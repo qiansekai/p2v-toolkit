@@ -86,6 +86,28 @@ def verify_vmdk(path: str, source_disk: int | None = None,
             checks.append({"name": "partition_guids_present_on_source",
                            "ok": not missing, "detail": "missing=%s" % missing})
 
+            # 元数据忠实性：磁盘签名 / 保护性 MBR 末 LBA / 分区 attributes 必须与源盘
+            # 逐字段一致。这三项历史上被硬编码过，旧版 verify 全绿也照样"克隆不忠实"。
+            with open_physical_drive(source_disk if source_disk is not None else 3) as src:
+                src_mbr = src.read_at(0, 512)
+            prod_mbr = reader.read_at(0, 512)
+            sig_p = struct.unpack_from("<I", prod_mbr, 0x1B8)[0]
+            sig_s = struct.unpack_from("<I", src_mbr, 0x1B8)[0]
+            end_p = struct.unpack_from("<I", prod_mbr, 0x1BE + 12)[0]
+            end_s = struct.unpack_from("<I", src_mbr, 0x1BE + 12)[0]
+            checks.append({"name": "mbr_disk_signature", "ok": sig_p == sig_s,
+                           "detail": "product=0x%08x source=0x%08x" % (sig_p, sig_s)})
+            checks.append({"name": "mbr_protective_end_lba", "ok": end_p == end_s,
+                           "detail": "product=%d source=%d" % (end_p, end_s)})
+            attr_bad = []
+            for p in gpt.partitions:
+                src_p = src_by_guid.get(str(p.part_guid))
+                if src_p is not None and src_p.attributes != p.attributes:
+                    attr_bad.append("part%d: 0x%x != 0x%x"
+                                    % (p.index, p.attributes, src_p.attributes))
+            checks.append({"name": "partition_attributes", "ok": not attr_bad,
+                           "detail": "mismatch=%s" % (attr_bad or "none")})
+
             shadow_dev = None
             if source_shadow is not None:
                 part = next((p for p in gpt.partitions if p.type_guid == TYPE_BASIC), None)

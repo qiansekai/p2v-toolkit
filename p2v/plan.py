@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import struct
 import subprocess
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -36,6 +37,7 @@ class Segment:
     type_guid: str = ""
     part_guid: str = ""
     name: str = ""
+    attributes: int = 0
 
 
 @dataclass
@@ -49,6 +51,8 @@ class Plan:
     target_disk_guid: str
     segments: list = field(default_factory=list)
     notes: list = field(default_factory=list)
+    disk_signature: int = 0
+    pmbr_end_lba: int | None = None
 
     def as_dict(self) -> dict:
         return {
@@ -61,6 +65,8 @@ class Plan:
             "target_capacity": self.target_capacity,
             "target_capacity_gib": round(self.target_capacity / 1024 ** 3, 2),
             "target_disk_guid": self.target_disk_guid,
+            "disk_signature": "0x%08x" % self.disk_signature,
+            "pmbr_end_lba": self.pmbr_end_lba,
             "segments": [asdict(s) for s in self.segments],
             "notes": self.notes,
         }
@@ -193,6 +199,11 @@ def build_plan(disk: int, take: list, out_path: str, sector_size: int | None = N
                 % (disk, sector_size))
         gpt = parse_gpt(dev, sector_size)
         source_capacity = dev.size
+        # 元数据必须逐项沿用源盘：磁盘签名与保护性 MBR 的末 LBA 都不是装饰，
+        # 由产物"重新计算"会与源盘不一致（磁盘签名尤其会被整体清零）。
+        mbr0 = dev.read_at(0, sector_size)
+        disk_signature = struct.unpack_from("<I", mbr0, 0x1B8)[0]
+        pmbr_end_lba = struct.unpack_from("<I", mbr0, 0x1BE + 12)[0]
         source_device = dev.path
         if not (gpt.header_crc_ok and gpt.entries_crc_ok):
             raise PlanError("source GPT failed CRC self-check; refusing to plan")
@@ -213,7 +224,8 @@ def build_plan(disk: int, take: list, out_path: str, sector_size: int | None = N
         for p in picked
     ]
     cap_sectors = source_capacity // sector_size
-    built = build_gpt(cap_sectors, target_disk_guid, target_parts, sector_size)
+    built = build_gpt(cap_sectors, target_disk_guid, target_parts, sector_size,
+                      disk_signature=disk_signature, pmbr_end_lba=pmbr_end_lba)
 
     plan = Plan(
         source_disk=disk,
@@ -223,6 +235,8 @@ def build_plan(disk: int, take: list, out_path: str, sector_size: int | None = N
         target_path=out_path,
         target_capacity=source_capacity,
         target_disk_guid=str(target_disk_guid),
+        disk_signature=disk_signature,
+        pmbr_end_lba=pmbr_end_lba,
     )
 
     plan.segments.append(Segment("mbr", 0, sector_size, "generated"))
@@ -283,7 +297,7 @@ def build_plan(disk: int, take: list, out_path: str, sector_size: int | None = N
                     "partition #%d 未找到可用卷影副本，将直读物理盘（crash-consistent）"
                     % p.index)
         elif p.type_guid == TYPE_BASIC:
-            plan.notes.append("partition #%d 直读物理盘（%s）" % (p.index, shadow_policy))
+            plan.notes.append("partition #%d 直读物理盘" % p.index)
 
         plan.segments.append(Segment(
             role="partition",
@@ -296,6 +310,7 @@ def build_plan(disk: int, take: list, out_path: str, sector_size: int | None = N
             type_guid=str(p.type_guid),
             part_guid=str(p.part_guid),
             name=p.name,
+            attributes=p.attributes,
         ))
 
     plan.notes.append("目标盘容量与源盘一致；未选中的分区保留为未分配空间（thin 不占空间）")

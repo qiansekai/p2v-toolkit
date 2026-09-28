@@ -66,6 +66,7 @@ class Partition:
         return {
             "index": self.index,
             "type": self.type_name,
+            "attributes": "0x%016x" % self.attributes,
             "type_guid": str(self.type_guid),
             "part_guid": str(self.part_guid),
             "first_lba": self.first_lba,
@@ -159,24 +160,36 @@ def parse_gpt(dev, sector_size: int = 512) -> GptDisk:
 PROTECTIVE_MBR_TYPE = 0xEE
 
 
-def build_protective_mbr(capacity_sectors: int, sector_size: int = 512) -> bytes:
-    """保护性 MBR：单个 0xEE 分区项覆盖整盘。"""
+def build_protective_mbr(capacity_sectors: int, sector_size: int = 512,
+                         disk_signature: int = 0,
+                         end_lba: int | None = None) -> bytes:
+    """保护性 MBR：单个 0xEE 分区项覆盖整盘。
+
+    disk_signature: LBA0 @0x1B8 的磁盘签名。克隆场景应沿用源盘值——它不是
+    装饰：MBR 盘上 UEFI 的 HD() 设备路径与 Windows 的 MountedDevices 都用到它。
+    end_lba: 0xEE 项覆盖的末 LBA。None 时按 UEFI 规范取
+    min(capacity-1, 0xFFFFFFFF)；源盘若按 Windows 惯例写满 0xFFFFFFFF，
+    克隆时应显式传入源盘值，保证产物与源盘逐字节一致。
+    """
     mbr = bytearray(sector_size)
+    struct.pack_into("<I", mbr, 0x1B8, int(disk_signature) & 0xFFFFFFFF)
     entry = 0x1BE
     mbr[entry + 0] = 0x00            # boot flag
     mbr[entry + 1:entry + 4] = b"\x00\x02\x00"   # start CHS (0/0/2)
     mbr[entry + 4] = PROTECTIVE_MBR_TYPE
     mbr[entry + 5:entry + 8] = b"\xff\xff\xff"   # end CHS
     struct.pack_into("<I", mbr, entry + 8, 1)
-    end_lba = min(capacity_sectors - 1, 0xFFFFFFFF)
-    struct.pack_into("<I", mbr, entry + 12, end_lba)
+    if end_lba is None:
+        end_lba = min(capacity_sectors - 1, 0xFFFFFFFF)
+    struct.pack_into("<I", mbr, entry + 12, int(end_lba) & 0xFFFFFFFF)
     mbr[510] = 0x55
     mbr[511] = 0xAA
     return bytes(mbr)
 
 
 def build_gpt(capacity_sectors: int, disk_guid: uuid.UUID, partitions: list,
-              sector_size: int = 512, num_entries: int = 128) -> dict:
+              sector_size: int = 512, num_entries: int = 128,
+              disk_signature: int = 0, pmbr_end_lba: int | None = None) -> dict:
     """构造 GPT 主/备结构与保护性 MBR。
 
     partitions: list[Partition]（用其 type_guid / part_guid / first_lba / last_lba /
@@ -229,7 +242,9 @@ def build_gpt(capacity_sectors: int, disk_guid: uuid.UUID, partitions: list,
     backup = _header(alt_lba, my_lba, backup_entries_lba)
 
     return {
-        "mbr": build_protective_mbr(capacity_sectors, sector_size),
+        "mbr": build_protective_mbr(capacity_sectors, sector_size,
+                                    disk_signature=disk_signature,
+                                    end_lba=pmbr_end_lba),
         "primary_header": primary,
         "primary_entries": bytes(table),
         "backup_entries": bytes(table),

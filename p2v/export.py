@@ -70,7 +70,7 @@ def _partitions_from_plan(plan: Plan) -> list:
             part_guid=uuid.UUID(seg.part_guid),
             first_lba=first,
             last_lba=first + count - 1,
-            attributes=0,
+            attributes=seg.attributes,
             name=seg.name,
             sector_size=SECTOR,
         ))
@@ -114,7 +114,9 @@ def run_export(plan: Plan, apply: bool = False, progress=None, chunk_mib=None) -
         # generated: 保护性 MBR + 主备 GPT（沿用源盘 disk GUID 与分区 GUID）
         parts = _partitions_from_plan(plan)
         built = build_gpt(plan.target_capacity // SECTOR,
-                          uuid.UUID(plan.target_disk_guid), parts, SECTOR)
+                          uuid.UUID(plan.target_disk_guid), parts, SECTOR,
+                          disk_signature=plan.disk_signature,
+                          pmbr_end_lba=plan.pmbr_end_lba)
         layout = built["layout"]
         w.write_at(0, built["mbr"])
         w.write_at(SECTOR, built["primary_header"])

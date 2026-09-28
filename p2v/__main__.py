@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 
 from .gpt import GptError, parse_gpt
 from .export import (DEFAULT_CHUNK_MIB, MAX_CHUNK_MIB, MIN_CHUNK_MIB,
@@ -88,12 +89,38 @@ def _cmd_plan(args: argparse.Namespace) -> int:
 
 
 def _cmd_export(args: argparse.Namespace) -> int:
+    # 人类可读模式给个进度：6 分钟静默对交互式使用太不友好（--json 时不打扰管道）
+    progress = None
+    if not args.json:
+        tick = {"last": 0.0}
+
+        def progress(seg, copied):                    # noqa: F811
+            now = time.time()
+            done = copied >= seg.size
+            if not done and now - tick["last"] < 1.0:
+                return
+            tick["last"] = now
+            sys.stderr.write("\r  partition #%s  %5.1f%%  %.1f/%.1f GiB   "
+                             % (seg.partition_index,
+                                100.0 * copied / max(seg.size, 1),
+                                copied / 1024 ** 3, seg.size / 1024 ** 3))
+            sys.stderr.flush()
+            if done:
+                sys.stderr.write("\n")
+
     try:
         plan = build_plan(args.disk, args.take, args.out, args.sector_size,
                           source_mode=args.source_mode)
-        result = run_export(plan, apply=args.apply, chunk_mib=args.chunk_mib)
+        result = run_export(plan, apply=args.apply, chunk_mib=args.chunk_mib,
+                            progress=progress)
     except (DeviceError, GptError, PlanError) as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
+        return 1
+    except Exception as exc:                          # 写盘中途的 IO 错误等
+        print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
+        if args.apply:
+            print("hint: %s 可能是不完整产物（未 finalize，无 GD/GT），删除后重跑即可"
+                  % args.out, file=sys.stderr)
         return 1
 
     if args.json:
