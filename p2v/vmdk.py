@@ -59,10 +59,24 @@ class SparseVmdkWriter:
         self.num_gts = (self.num_grains + NUM_GTES_PER_GT - 1) // NUM_GTES_PER_GT
         self.gd_sectors = max(1, (self.num_gts * 4 + SECTOR - 1) // SECTOR)
 
-        self.rgd_offset = 1 + DESCRIPTOR_SECTORS                  # 21
-        self.gd_offset = self.rgd_offset + self.gd_sectors
-        self.gt_offset = self.gd_offset + self.gd_sectors
+        self.entry_table_sectors = max(1, (self.num_gts * 4 + SECTOR - 1) // SECTOR)
         self.gt_area_sectors = self.num_gts * GT_SECTORS
+
+        # 布局必须与 qemu-img 的成品一致，否则 VMware 的 DISKLIB-SPARSECHK 会报
+        #   Invalid GD or RGD ...
+        # 并直接判定 "The specified virtual disk needs repair"。
+        #
+        # 实测（qemu q1g: gts=8 -> rgd=21 gd=54；starwind t: gts=1 -> rgd=21 gd=26）：
+        #   RGD 区紧跟着一份【冗余 GT 区】，RGD[i] 指向冗余 GT 区的第 i 张 GT，
+        #   主 GD[i] 指向主 GT 区的第 i 张 GT，两区内容相同。
+        #   gd_offset = rgd_offset + rgd_need + gts*GT_SECTORS   (21+1+32=54 / 21+1+4=26)
+        self.rgd_offset = 1 + DESCRIPTOR_SECTORS                  # 21
+        self.rgd_sectors = self.entry_table_sectors
+        self.redundant_gt_offset = self.rgd_offset + self.rgd_sectors
+        self.redundant_gt_sectors = self.gt_area_sectors
+        self.gd_offset = self.redundant_gt_offset + self.redundant_gt_sectors
+        self.gd_sectors = self.entry_table_sectors
+        self.gt_offset = self.gd_offset + self.gd_sectors
         self.data_offset = _align_up(self.gt_offset + self.gt_area_sectors, 128)
         self.overhead = self.data_offset
 
@@ -82,15 +96,14 @@ class SparseVmdkWriter:
         self._reserve_metadata()
         return self
 
-    def __exit__(self, *exc: object) -> None:
-        if self._f is not None and not self._finalized:
-            try:
-                self.finalize()
-            finally:
-                pass
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        # 有异常时**不** finalize：半成品不该看起来像一个正常的 vmdk
         if self._f is not None:
+            if exc_type is None and not self._finalized:
+                self.finalize()
             self._f.close()
             self._f = None
+        return False
 
     def _reserve_metadata(self) -> None:
         """把 header/descriptor/RGD/GD/GT 区域先占位成零，保证后续随机写不越界。"""
@@ -188,16 +201,26 @@ class SparseVmdkWriter:
         self._f.seek(1 * SECTOR)
         self._f.write(desc + b"\x00" * (DESCRIPTOR_SECTORS * SECTOR - len(desc)))
 
-        gd_bytes = struct.pack("<%dI" % self.num_gts, *self.gd)
-        gd_padded = gd_bytes + b"\x00" * (self.gd_sectors * SECTOR - len(gd_bytes))
+        def _pack32(vals: list) -> bytes:
+            raw = struct.pack("<%dI" % len(vals), *vals)
+            pad = self.entry_table_sectors * SECTOR - len(raw)
+            return raw + b"\x00" * pad
+
+        # 主 GD -> 主 GT 区；RGD -> 冗余 GT 区（两台 GT 内容相同，互为备份）
+        gd_main = [self.gt_offset + i * GT_SECTORS if self.gd[i] else 0
+                   for i in range(self.num_gts)]
+        rgd_vals = [self.redundant_gt_offset + i * GT_SECTORS if self.gd[i] else 0
+                    for i in range(self.num_gts)]
         self._f.seek(self.gd_offset * SECTOR)
-        self._f.write(gd_padded)
+        self._f.write(_pack32(gd_main))
         self._f.seek(self.rgd_offset * SECTOR)
-        self._f.write(gd_padded)
+        self._f.write(_pack32(rgd_vals))
 
         for i, gt in enumerate(self.gts):
             blob = struct.pack("<%dI" % NUM_GTES_PER_GT, *gt)
             self._f.seek((self.gt_offset + i * GT_SECTORS) * SECTOR)
+            self._f.write(blob)
+            self._f.seek((self.redundant_gt_offset + i * GT_SECTORS) * SECTOR)
             self._f.write(blob)
 
         header = bytearray(512)
