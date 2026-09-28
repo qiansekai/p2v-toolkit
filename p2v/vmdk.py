@@ -233,3 +233,96 @@ class SparseVmdkWriter:
             "allocated_grains": self.allocated_grains,
             "allocated_bytes": self.allocated_grains * GRAIN_SECTORS * SECTOR,
         }
+
+class SparseVmdkReader:
+    """读取 monolithicSparse vmdk（自包含，供 verify 使用，不依赖外部工具）。
+
+    接口与 ReadOnlyDevice 一致：size / read_at。
+    """
+
+    __slots__ = ("path", "sector_size", "capacity_sectors", "grain_sectors",
+                 "num_gtes_per_gt", "flags", "gd_offset", "overhead",
+                 "_f", "_gd", "_gt_cache")
+
+    def __init__(self, path: str, sector_size: int = SECTOR) -> None:
+        self.path = path
+        self.sector_size = sector_size
+        self._f = open(path, "rb")
+        self._gt_cache = {}
+
+        header = self._f.read(512)
+        (magic, version, flags, capacity, grain, desc_off, desc_size,
+         num_gtes, rgd_off, gd_off, overhead) = struct.unpack_from("<IIIQQQQIQQQ", header, 0)
+        if magic != VMDK_MAGIC:
+            raise VmdkError("not a sparse vmdk (magic=0x%08X)" % magic)
+        if version != VMDK_VERSION:
+            raise VmdkError("unsupported vmdk version %d" % version)
+        if grain != GRAIN_SECTORS or num_gtes != NUM_GTES_PER_GT:
+            raise VmdkError("unsupported geometry: grain=%d numGTEsPerGT=%d" % (grain, num_gtes))
+
+        self.capacity_sectors = capacity
+        self.grain_sectors = grain
+        self.num_gtes_per_gt = num_gtes
+        self.flags = flags
+        self.gd_offset = gd_off
+        self.overhead = overhead
+
+        num_gts = (capacity + grain - 1) // grain
+        num_gd_entries = (num_gts + num_gtes - 1) // num_gtes
+        self._f.seek(gd_off * sector_size)
+        raw_gd = self._f.read(num_gd_entries * 4)
+        self._gd = list(struct.unpack("<%dI" % num_gd_entries, raw_gd))
+
+    @property
+    def size(self) -> int:
+        return self.capacity_sectors * self.sector_size
+
+    def _grain_sector(self, grain_index: int) -> int:
+        gt_i, gte_i = divmod(grain_index, self.num_gtes_per_gt)
+        if gt_i >= len(self._gd):
+            return 0
+        gt_sector = self._gd[gt_i]
+        if gt_sector == 0:
+            return 0
+        if gt_i not in self._gt_cache:
+            self._f.seek(gt_sector * self.sector_size)
+            self._gt_cache[gt_i] = struct.unpack("<%dI" % self.num_gtes_per_gt,
+                                                 self._f.read(self.num_gtes_per_gt * 4))
+        return self._gt_cache[gt_i][gte_i]
+
+    def read_at(self, offset: int, size: int) -> bytes:
+        if offset < 0 or size < 0:
+            raise ValueError("negative offset/size")
+        if offset + size > self.size:
+            raise ValueError("read out of range: %d+%d > %d" % (offset, size, self.size))
+        grain_bytes = self.grain_sectors * self.sector_size
+        out = bytearray()
+        pos = offset
+        remaining = size
+        while remaining > 0:
+            grain_index = pos // grain_bytes
+            inner = pos % grain_bytes
+            take = min(grain_bytes - inner, remaining)
+            sector = self._grain_sector(grain_index)
+            if sector == 0:
+                out.extend(b"\x00" * take)
+            else:
+                self._f.seek(sector * self.sector_size + inner)
+                out.extend(self._f.read(take))
+            pos += take
+            remaining -= take
+        return bytes(out)
+
+    def read_sectors(self, lba: int, count: int) -> bytes:
+        return self.read_at(lba * self.sector_size, count * self.sector_size)
+
+    def close(self) -> None:
+        if self._f:
+            self._f.close()
+            self._f = None
+
+    def __enter__(self) -> "SparseVmdkReader":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()

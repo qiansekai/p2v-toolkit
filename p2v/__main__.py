@@ -19,6 +19,7 @@ import sys
 from .gpt import GptError, parse_gpt
 from .export import run_export
 from .plan import PlanError, build_plan
+from .verify import verify_vmdk
 from .safeio import DeviceError, open_physical_drive
 
 
@@ -100,6 +101,24 @@ def _cmd_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_verify(args: argparse.Namespace) -> int:
+    try:
+        result = verify_vmdk(args.vmdk, args.source_disk, args.sample_bytes)
+    except Exception as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    else:
+        print("%s  capacity=%.2f GiB  flags=%s" % (
+            result["path"], result.get("capacity_gib", 0), result.get("flags")))
+        for c in result["checks"]:
+            print("  [%s] %-34s %s" % ("OK " if c["ok"] else "FAIL", c["name"], c["detail"][:110]))
+        print("verdict: %s" % ("PASS" if result["ok"] else "FAIL"))
+    return 0 if result["ok"] else 2
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="p2v", description="agent 友好的 P2V 工具链（源设备只读）")
     sub = ap.add_subparsers(dest="command", required=True)
@@ -129,6 +148,14 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--apply", action="store_true", help="真正写盘（不加则只预检）")
     e.add_argument("--json", action="store_true")
     e.set_defaults(func=_cmd_export)
+
+    vp = sub.add_parser("verify", help="校验产物 vmdk（自包含解析）")
+    vp.add_argument("--vmdk", required=True)
+    vp.add_argument("--source-disk", type=int, default=None,
+                    help="对比源盘（只读），如 3")
+    vp.add_argument("--sample-bytes", type=int, default=4 * 1024 * 1024)
+    vp.add_argument("--json", action="store_true")
+    vp.set_defaults(func=_cmd_verify)
 
     return ap
 

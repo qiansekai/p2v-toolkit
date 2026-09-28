@@ -185,10 +185,10 @@ def build_gpt(capacity_sectors: int, disk_guid: uuid.UUID, partitions: list,
     """
     entries_sectors = (num_entries * ENTRY_SIZE) // sector_size
     entries_lba = 2
-    backup_entries_lba = capacity_sectors - entries_sectors
+    alt_lba = capacity_sectors - 1
+    backup_entries_lba = alt_lba - entries_sectors   # 必须紧邻备份 header，再减 1 会与它重叠
     first_usable = entries_lba + entries_sectors
     last_usable = backup_entries_lba - 1
-    alt_lba = capacity_sectors - 1
     my_lba = 1
 
     for p in partitions:
