@@ -13,10 +13,28 @@ import uuid
 
 from .gpt import ENTRY_SIZE, Partition, build_gpt, build_protective_mbr
 from .plan import Plan, PlanError, Segment
-from .safeio import DEFAULT_SECTOR as SECTOR, open_physical_drive, open_shadow
+from .safeio import DEFAULT_SECTOR, DEFAULT_SECTOR as SECTOR, open_physical_drive, open_shadow
 from .vmdk import SparseVmdkWriter
 
 CHUNK = 4 * 1024 * 1024
+MIB = 1024 * 1024
+
+
+def _readable_length(dev, declared: int) -> int:
+    """探测源设备实际可读上限。
+
+    VSS 卷影副本只覆盖文件系统部分：例如 C 分区是 137440002048 字节，
+    但快照可读长度只有 137438953472（= 卷大小 137439997952 按 1 MiB 对齐）。
+    直接按分区大小读会在末尾撞短读。这里从 declared 按 1 MiB 向下回退探测。
+    """
+    end = (declared // MIB) * MIB
+    while end > 0:
+        try:
+            dev.read_at(end - DEFAULT_SECTOR, DEFAULT_SECTOR)
+            return end
+        except Exception:
+            end -= MIB
+    return 0
 
 
 def _partitions_from_plan(plan: Plan) -> list:
@@ -62,6 +80,7 @@ def run_export(plan: Plan, apply: bool = False, progress=None) -> dict:
 
     started = time.time()
     stats = None
+    warnings: list = []
     with SparseVmdkWriter(plan.target_path, plan.target_capacity) as w:
         # generated: 保护性 MBR + 主备 GPT（沿用源盘 disk GUID 与分区 GUID）
         parts = _partitions_from_plan(plan)
@@ -89,18 +108,30 @@ def run_export(plan: Plan, apply: bool = False, progress=None) -> dict:
                 else:
                     raise PlanError("unknown source kind: %s" % seg.source_kind)
 
+                # 卷影副本的可读长度可能小于分区大小，末段需补零（NTFS 尾部对齐区）
+                readable = _readable_length(src, seg.size) if seg.source_kind == "shadow" else seg.size
+                padded = max(0, seg.size - readable)
+
                 copied = 0
                 while copied < seg.size:
-                    take = min(CHUNK, seg.size - copied)
-                    try:
-                        chunk = src.read_at(src_offset + copied, take)
-                    except Exception as exc:
-                        raise PlanError("read failed at partition %s offset %d: %s"
-                                        % (seg.partition_index, copied, exc))
+                    if copied >= readable:
+                        take = min(CHUNK, seg.size - copied)
+                        chunk = b"\x00" * take
+                    else:
+                        take = min(CHUNK, readable - copied)
+                        try:
+                            chunk = src.read_at(src_offset + copied, take)
+                        except Exception as exc:
+                            raise PlanError("read failed at partition %s offset %d: %s"
+                                            % (seg.partition_index, copied, exc))
                     w.write_at(seg.dest_offset + copied, chunk)
                     copied += take
                     if progress:
                         progress(seg, copied)
+                if padded:
+                    warnings.append(
+                        "partition %s: 卷影副本可读长度比分区少 %d 字节，已零填充（thin 不占空间）"
+                        % (seg.partition_index, padded))
         finally:
             physical.close()
             for dev in shadows.values():
@@ -118,5 +149,6 @@ def run_export(plan: Plan, apply: bool = False, progress=None) -> dict:
         "allocated_bytes": stats["allocated_bytes"],
         "elapsed_sec": round(elapsed, 1),
         "throughput_mb_s": round(total_bytes / 1024 ** 2 / max(elapsed, 1e-6), 1),
+        "warnings": warnings,
     }
     return out

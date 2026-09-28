@@ -103,7 +103,7 @@ def _cmd_export(args: argparse.Namespace) -> int:
 
 def _cmd_verify(args: argparse.Namespace) -> int:
     try:
-        result = verify_vmdk(args.vmdk, args.source_disk, args.sample_bytes)
+        result = verify_vmdk(args.vmdk, args.source_disk, args.source_shadow, args.sample_bytes)
     except Exception as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
         return 1
@@ -153,6 +153,8 @@ def build_parser() -> argparse.ArgumentParser:
     vp.add_argument("--vmdk", required=True)
     vp.add_argument("--source-disk", type=int, default=None,
                     help="对比源盘（只读），如 3")
+    vp.add_argument("--source-shadow", type=int, default=None,
+                    help="对比该卷影副本序号（NTFS 全量比对应使用导出时所用的快照）")
     vp.add_argument("--sample-bytes", type=int, default=4 * 1024 * 1024)
     vp.add_argument("--json", action="store_true")
     vp.set_defaults(func=_cmd_verify)
