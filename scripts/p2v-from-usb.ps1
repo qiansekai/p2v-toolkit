@@ -72,8 +72,13 @@ if ($d.IsOffline) { Info '盘处于 offline；读取一般仍可用，若 probe 
 try {
     $enc = @(Get-BitLockerVolume -ErrorAction Stop | Where-Object { $_.VolumeStatus -ne 'FullyDecrypted' })
     if ($enc.Count -gt 0) {
-        Write-Host '[!] 检测到 BitLocker 卷：导出的会是密文，产物无法开机' -ForegroundColor Yellow
+        Write-Host '[!] 检测到 BitLocker 卷（ESP 不加密，只有 Windows 卷是密文）' -ForegroundColor Yellow
         $enc | ForEach-Object { Write-Host ("      {0}  {1}" -f $_.MountPoint, $_.VolumeStatus) -ForegroundColor Yellow }
+        Write-Host '    克隆照常进行，产物结构完整；但 VM 的虚拟 TPM 与源机不是同一个，' -ForegroundColor Yellow
+        Write-Host '    首次启动会停在 BitLocker 恢复界面，需要 48 位恢复密钥（或启动密码）。' -ForegroundColor Yellow
+        Write-Host '    有密钥：输入即可进系统，进去后建议 manage-bde -off 关掉加密。' -ForegroundColor Yellow
+        Write-Host '    没密钥：产物无法开机；可把盘装回源机先 manage-bde -off 解密再拆。' -ForegroundColor Yellow
+        Write-Host '    密钥通常在 account.microsoft.com/devices/recoverykey / 公司 AD / 自存文本。' -ForegroundColor Yellow
     } else { Ok 'BitLocker：无加密卷' }
 } catch { Info 'BitLocker 状态查询不可用（缺模块或权限），请自行确认' }
 
