@@ -36,6 +36,8 @@ python -m p2v plan --disk 3 --take "ESP,MSR,vol:C:" --out 'H:\sys-p2v.vmdk'
 
 # 3) 导出（默认 dry-run；加 --apply 才写盘）
 python -m p2v export --disk 3 --take "ESP,MSR,vol:C:" --out 'H:\sys-p2v.vmdk' --apply --json
+#    读写块大小可调：--chunk-mib N（1..256，默认 4）；块越大，Python 层循环与
+#    grain 切分次数越少（128 GiB 在 4 MiB 下约 3.3 万次循环，64 MiB 下约 2 千次）
 
 # 4) 自检产物（结构 + 与源盘内容抽样比对）
 python -m p2v verify --vmdk 'H:\sys-p2v.vmdk' --source-disk 3

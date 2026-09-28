@@ -16,8 +16,19 @@ from .plan import Plan, PlanError, Segment
 from .safeio import DEFAULT_SECTOR, DEFAULT_SECTOR as SECTOR, open_physical_drive, open_shadow
 from .vmdk import SparseVmdkWriter
 
-CHUNK = 4 * 1024 * 1024
 MIB = 1024 * 1024
+DEFAULT_CHUNK_MIB = 4
+MIN_CHUNK_MIB = 1
+MAX_CHUNK_MIB = 256
+
+
+def resolve_chunk_bytes(chunk_mib=None) -> int:
+    """把 --chunk-mib 解析为字节数并校验边界。块越大，Python 层循环与 grain 切分次数越少。"""
+    mib = DEFAULT_CHUNK_MIB if chunk_mib is None else int(chunk_mib)
+    if not (MIN_CHUNK_MIB <= mib <= MAX_CHUNK_MIB):
+        raise PlanError("chunk size must be within %d..%d MiB, got %d"
+                        % (MIN_CHUNK_MIB, MAX_CHUNK_MIB, mib))
+    return mib * MIB
 
 
 def _readable_length(dev, declared: int) -> int:
@@ -66,8 +77,13 @@ def _partitions_from_plan(plan: Plan) -> list:
     return parts
 
 
-def run_export(plan: Plan, apply: bool = False, progress=None) -> dict:
-    """执行导出。apply=False 时仅预检并返回将要做的动作。"""
+def run_export(plan: Plan, apply: bool = False, progress=None, chunk_mib=None) -> dict:
+    """执行导出。apply=False 时仅预检并返回将要做的动作。
+
+    chunk_mib: 读写块大小（MiB）。调大可减少 Python 层循环与 grain 切分次数；
+    None 表示用 DEFAULT_CHUNK_MIB。
+    """
+    chunk = resolve_chunk_bytes(chunk_mib)
     data_segments = [s for s in plan.segments if s.role == "partition"]
     total_bytes = sum(s.size for s in data_segments)
 
@@ -80,6 +96,7 @@ def run_export(plan: Plan, apply: bool = False, progress=None) -> dict:
             "data_segments": len(data_segments),
             "data_bytes": total_bytes,
             "data_gib": round(total_bytes / 1024 ** 3, 2),
+            "chunk_mib": chunk // MIB,
             "message": "dry-run only; pass apply=True (CLI --apply) to write",
             "manual_steps": MANUAL_POST_STEPS,
         }
@@ -127,10 +144,10 @@ def run_export(plan: Plan, apply: bool = False, progress=None) -> dict:
                 copied = 0
                 while copied < seg.size:
                     if copied >= readable:
-                        take = min(CHUNK, seg.size - copied)
+                        take = min(chunk, seg.size - copied)
                         chunk = b"\x00" * take
                     else:
-                        take = min(CHUNK, readable - copied)
+                        take = min(chunk, readable - copied)
                         try:
                             chunk = src.read_at(src_offset + copied, take)
                         except Exception as exc:
@@ -161,6 +178,7 @@ def run_export(plan: Plan, apply: bool = False, progress=None) -> dict:
         "allocated_bytes": stats["allocated_bytes"],
         "elapsed_sec": round(elapsed, 1),
         "throughput_mb_s": round(total_bytes / 1024 ** 2 / max(elapsed, 1e-6), 1),
+        "chunk_mib": chunk // MIB,
         "warnings": warnings,
         "manual_steps": MANUAL_POST_STEPS,
     }

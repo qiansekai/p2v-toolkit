@@ -17,7 +17,8 @@ import json
 import sys
 
 from .gpt import GptError, parse_gpt
-from .export import run_export
+from .export import (DEFAULT_CHUNK_MIB, MAX_CHUNK_MIB, MIN_CHUNK_MIB,
+                     run_export)
 from .plan import PlanError, build_plan
 from .verify import verify_vmdk
 from .safeio import DeviceError, open_physical_drive
@@ -88,7 +89,7 @@ def _cmd_plan(args: argparse.Namespace) -> int:
 def _cmd_export(args: argparse.Namespace) -> int:
     try:
         plan = build_plan(args.disk, args.take, args.out, args.sector_size)
-        result = run_export(plan, apply=args.apply)
+        result = run_export(plan, apply=args.apply, chunk_mib=args.chunk_mib)
     except (DeviceError, GptError, PlanError) as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
         return 1
@@ -155,6 +156,9 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--out", required=True)
     e.add_argument("--sector-size", type=int, default=512)
     e.add_argument("--apply", action="store_true", help="真正写盘（不加则只预检）")
+    e.add_argument("--chunk-mib", type=int, default=None,
+                   help="读写块大小（MiB，%d..%d，默认 %d）；调大可减少 Python 层循环开销"
+                        % (MIN_CHUNK_MIB, MAX_CHUNK_MIB, DEFAULT_CHUNK_MIB))
     e.add_argument("--json", action="store_true")
     e.set_defaults(func=_cmd_export)
 
