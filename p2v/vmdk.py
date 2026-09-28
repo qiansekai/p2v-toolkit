@@ -207,10 +207,13 @@ class SparseVmdkWriter:
             return raw + b"\x00" * pad
 
         # 主 GD -> 主 GT 区；RGD -> 冗余 GT 区（两台 GT 内容相同，互为备份）
-        gd_main = [self.gt_offset + i * GT_SECTORS if self.gd[i] else 0
-                   for i in range(self.num_gts)]
-        rgd_vals = [self.redundant_gt_offset + i * GT_SECTORS if self.gd[i] else 0
-                    for i in range(self.num_gts)]
+        # 注意：GD / RGD 这一层**不稀疏** —— 每一项都必须指向对应的 GT 位置
+        # （稀疏性只体现在 GTE 层：GTE == 0 表示该 grain 未分配）。
+        # qemu-img 的成品同样如此（q1g.vmdk 的 8 个 GD 项全非零）。
+        # 若把未分配 GT 的 GD 项写成 0，VMware 的 SPARSECHK 会对每一项报
+        #   Invalid GD or RGD [i]: <gt pos>,<rgt pos> vs. 0,0
+        gd_main = [self.gt_offset + i * GT_SECTORS for i in range(self.num_gts)]
+        rgd_vals = [self.redundant_gt_offset + i * GT_SECTORS for i in range(self.num_gts)]
         self._f.seek(self.gd_offset * SECTOR)
         self._f.write(_pack32(gd_main))
         self._f.seek(self.rgd_offset * SECTOR)
