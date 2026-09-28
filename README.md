@@ -1,28 +1,76 @@
 # p2v-toolkit
 
-把物理盘上的系统卷 + ESP 导出为可引导 vmdk，并可重组目标盘布局。
+把物理盘上的系统卷 + ESP 导出为可引导 vmdk，并可显式重组目标盘布局。
 
-## 为什么
+## 为什么不是 DiskGenius
 
-手工 P2V（克隆盘 + 删驱动）会同时引爆三个问题：分区 GUID 变化导致盘符错乱、
-设备实例悬空、生成器不注入驱动。本工具用「定向取卷 + 保留 GUID」把前两个从源头掐掉。
+DG 能干这活，但它在克隆时**重建分区 GUID**，于是 Windows 的 `MountedDevices`
+里 `\DosDevices\C:` 指向的旧 GUID 失效，系统盘被挂成 `V:` —— 这正是本项目作者
+踩过的坑（盘符错乱 + 悬空设备实例）。本工具的做法：
 
-## 安全
+| | DiskGenius | p2v-toolkit |
+|---|---|---|
+| 源盘 | 只读克隆 | **只读**（代码层不存在写路径） |
+| 分区 GUID | 重建（→ 盘符错乱） | **沿用原 GUID 与偏移** |
+| 目标布局 | 克隆时重组 | **v1 不动布局**；要扩容就在 PE 里跑 `scripts/expand-system-in-pe.cmd` |
+| 数据盘 | 一并处理 | **跳过**（例：源盘 931GB 中的 588GB 数据分区不复制） |
+| 一致性 | VSS | 系统卷从 **VSS 快照**读；ESP 直读（几乎不变） |
+| 接口 | GUI | CLI + JSON，可断点审阅、可被 agent 驱动 |
 
-- 源设备**只读**（代码层无写路径）
-- 默认 dry-run；`--apply` 才写盘
-- 不装驱动、不改宿主机引导
+## 安全约束
 
-## 用法（规划中）
+- 源设备**只以 GENERIC_READ 打开**，`p2v/safeio.py` 不提供任何写 API
+- **不安装内核驱动**、不改宿主机分区表 / BCD / VSS 配置
+- `plan` 纯只读、零副作用；`export` 默认 dry-run，`--apply` 才落盘
+- 目标已存在一律拒绝
+- 每个阶段都有自检：GPT 双 CRC、`verify` 子命令（可对比源盘内容采样）
 
+## 完整流程
+
+```powershell
+# 1) 看源盘布局（只读）
+python -m p2v probe --disk 3
+
+# 2) 生成计划（只读，输出可审阅的 JSON；不会创建文件）
+python -m p2v plan --disk 3 --take "ESP,MSR,vol:C:" --out 'H:\sys-p2v.vmdk'
+
+# 3) 导出（默认 dry-run；加 --apply 才写盘）
+python -m p2v export --disk 3 --take "ESP,MSR,vol:C:" --out 'H:\sys-p2v.vmdk' --apply --json
+
+# 4) 自检产物（结构 + 与源盘内容抽样比对）
+python -m p2v verify --vmdk 'H:\sys-p2v.vmdk' --source-disk 3
 ```
-python -m p2v probe  --disk 3 --json
-python -m p2v plan   --disk 3 --take ESP,C --out H:\sys.vmdk --json
-python -m p2v export --plan plan.json --apply --resume
-python -m p2v verify --vmdk H:\sys.vmdk --json
-```
+
+可选收尾（需要 DiskGenius 那种「单分区」效果时）：
+
+1. 用导出的 vmdk 建 VM 并从 FirPE 启动；
+2. 在 PE 里运行 `scripts\expand-system-in-pe.cmd`（只对系统卷做 `diskpart extend`，
+   不删分区、不改 GUID）；
+3. 关机，改回从硬盘启动验证。
 
 ## 依赖
 
-仅标准库（ctypes / struct / zlib / json）。
-`dissect.target`、`qemu-img` 仅用于**交叉验证**，不是运行依赖。
+运行：仅 Python 标准库（ctypes / struct / zlib / json）+ Windows 自带 `powershell`。
+`qemu-img`、`dissect.target` 只用于**交叉验证**，不是运行依赖。
+
+## 目录
+
+```
+p2v/
+  safeio.py   只读设备层（物理盘 / VSS 快照 / 文件），无写 API
+  gpt.py      GPT 解析与构造（保护性 MBR、主备表、CRC32）
+  vmdk.py     sparse vmdk 读写（monolithicSparse）
+  vss.py      卷影副本枚举 / 卷容量（默认不改 VSS 状态）
+  plan.py     导出计划（纯只读）
+  export.py   按计划导出（默认 dry-run）
+  verify.py   产物自检
+scripts/
+  expand-system-in-pe.cmd   PE 内可选的系统分区扩容
+```
+
+## 已知边界
+
+- 目标盘容量与源盘一致，未选中的分区保留为未分配空间（thin vmdk 不占空间）
+- 不做驱动注入（与 DG 相同）；换硬件后仍需处理驱动适配
+- 仅支持 GPT + 512B 扇区
+- VSS 为卷级技术，物理设备层面不存在整盘快照；本项目按「ESP 直读 + 系统卷走快照」组合
