@@ -41,6 +41,19 @@ python -m p2v export --disk 3 --take "ESP,MSR,vol:C:" --out 'H:\sys-p2v.vmdk' --
 python -m p2v verify --vmdk 'H:\sys-p2v.vmdk' --source-disk 3
 ```
 
+## 导出后必须人工收尾（不可跳过）
+
+**导出的 vmdk 不能直接开机。** 必须在 PE 里做两步（本机两次独立复现验证）：
+
+1. **重建引导引用**：`bcdboot C:\Windows /s <ESP盘符>: /f UEFI`
+   不做会报 `0xc000000e`（`File: \Windows\system32\winload.efi`）
+2. **删除所有后装驱动**：Dism++ 一键，或 `dism /image:C:\ /get-drivers`
+   后逐个 `/remove-driver /driver:oemN.inf /uninstall`
+   不做可能因与原机硬件绑定的驱动在过引导后出问题
+
+`export` 结束时会在 stdout 与 `--json` 的 `manual_steps` 字段里重复这段提示。
+排查过程与根因记录见 `Notes\env\env-vmware-p2v.md`、`Notes\env\env-vmware-p2v-toolkit.md`。
+
 可选收尾（需要 DiskGenius 那种「单分区」效果时）：
 
 1. 用导出的 vmdk 建 VM 并从 FirPE 启动；
@@ -71,6 +84,7 @@ scripts/
 ## 已知边界
 
 - 目标盘容量与源盘一致，未选中的分区保留为未分配空间（thin vmdk 不占空间）
+- 只负责拷贝：**不重建引导引用、不清理后装驱动**（见上节，必须在 PE 里人工完成两次收尾）
 - 不做驱动注入（与 DG 相同）；换硬件后仍需处理驱动适配
 - 仅支持 GPT + 512B 扇区
 - VSS 为卷级技术，物理设备层面不存在整盘快照；本项目按「ESP 直读 + 系统卷走快照」组合

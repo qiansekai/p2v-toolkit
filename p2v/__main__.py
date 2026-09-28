@@ -97,7 +97,16 @@ def _cmd_export(args: argparse.Namespace) -> int:
         print(json.dumps(result, indent=2, ensure_ascii=False))
     else:
         for k, v in result.items():
+            if k == "manual_steps":
+                continue
             print("%-16s %s" % (k, v))
+        steps = result.get("manual_steps") or []
+        if steps:
+            print("")
+            print("!" * 74)
+            for line in steps:
+                print(line)
+            print("!" * 74)
     return 0
 
 
