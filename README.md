@@ -45,10 +45,10 @@ python -m p2v verify --vmdk 'H:\sys-p2v.vmdk' --source-disk 3
 
 **导出的 vmdk 不能直接开机。** 必须在 PE 里做两步（本机两次独立复现验证）：
 
-1. **重建引导引用**：`bcdboot C:\Windows /s <ESP盘符>: /f UEFI`
+1. **引导修复** —— Dism++ → 引导修复
+   （等价命令：`bcdboot C:\Windows /s <ESP盘符>: /f UEFI`）
    不做会报 `0xc000000e`（`File: \Windows\system32\winload.efi`）
-2. **删除所有后装驱动**：Dism++ 一键，或 `dism /image:C:\ /get-drivers`
-   后逐个 `/remove-driver /driver:oemN.inf /uninstall`
+2. **删除所有后装驱动** —— Dism++ → 驱动管理 → 删除所有后装驱动（保留 in-box）
    不做可能因与原机硬件绑定的驱动在过引导后出问题
 
 `export` 结束时会在 stdout 与 `--json` 的 `manual_steps` 字段里重复这段提示。

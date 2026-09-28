@@ -39,11 +39,11 @@ def _readable_length(dev, declared: int) -> int:
 
 MANUAL_POST_STEPS = [
     "产物已导出，但还不能直接开机：本工具只做拷贝，不做引导修复与驱动清理。",
-    "必须在 PE 里完成两步收尾（本机已两次独立验证）：",
-    "  1) 重建引导引用： bcdboot C:\\Windows /s <ESP盘符>: /f UEFI",
-    "     不做会报 0xc000000e（File: \\Windows\\system32\\winload.efi）",
-    "  2) 删除所有后装驱动： Dism++ 一键，或 dism /image:C:\\ /get-drivers 后逐个 /remove-driver",
-    "     不做可能因与原机硬件绑定的驱动在过引导后出问题",
+    "请在 PE 里用 Dism++ 点两下完成收尾（本机已两次独立验证）：",
+    "  1) Dism++ → 引导修复        # 不做会报 0xc000000e（File: \\Windows\\system32\\winload.efi）",
+    "  2) Dism++ → 驱动管理 → 删除所有后装驱动（保留 in-box）",
+    "                              # 不做可能因与原机硬件绑定的驱动在过引导后出问题",
+    "命令行等价物（不喜欢点击时用）： bcdboot C:\\Windows /s <ESP盘符>: /f UEFI",
     "参考： Notes\\env\\env-vmware-p2v.md（黑屏 / 0xc000000e 排查）",
 ]
 
