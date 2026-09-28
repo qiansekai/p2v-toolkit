@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import struct
 from ctypes import wintypes
 
 GENERIC_READ = 0x80000000
@@ -25,6 +26,7 @@ FILE_SHARE_WRITE = 0x00000002
 OPEN_EXISTING = 3
 INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 IOCTL_DISK_GET_LENGTH_INFO = 0x0007405C
+IOCTL_DISK_GET_DRIVE_GEOMETRY_EX = 0x000700A0
 DEFAULT_SECTOR = 512
 
 _k32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -65,12 +67,15 @@ class ReadOnlyDevice:
         字节数。为 None 时用 IOCTL_DISK_GET_LENGTH_INFO 查询；
         VSS 卷影副本设备不支持该 IOCTL，必须显式传入 size。
     sector_size:
-        扇区大小，默认 512。裸设备读取会按它对齐。
+        扇区大小。None（默认）表示向设备查询 DISK_GEOMETRY_EX 的真实逻辑扇区；
+        查询不到时回落 512。裸设备读取按它对齐，所以 4Kn 盘必须拿到真值，
+        否则偏移全部错位。
     """
 
     __slots__ = ("path", "sector_size", "_h", "_size")
 
-    def __init__(self, path: str, size: int | None = None, sector_size: int = DEFAULT_SECTOR) -> None:
+    def __init__(self, path: str, size: int | None = None,
+                 sector_size: int | None = None) -> None:
         handle = _k32.CreateFileW(
             path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
             None, OPEN_EXISTING, 0, None,
@@ -80,8 +85,8 @@ class ReadOnlyDevice:
                 "CreateFileW failed for %r (err=%d)" % (path, ctypes.get_last_error())
             )
         self.path = path
-        self.sector_size = int(sector_size)
         self._h = handle
+        self.sector_size = int(sector_size) if sector_size else self._query_sector_size()
         self._size = int(size) if size is not None else self._query_size()
 
     # -- metadata ---------------------------------------------------------
@@ -93,6 +98,24 @@ class ReadOnlyDevice:
     @property
     def total_sectors(self) -> int:
         return self._size // self.sector_size
+
+    def _query_sector_size(self) -> int:
+        """查询设备逻辑扇区大小；不支持该 IOCTL 时回落 512。
+
+        DISK_GEOMETRY_EX = DISK_GEOMETRY(24B) + DiskSize(8B) + Data[]，
+        BytesPerSector 是 DISK_GEOMETRY 的第 5 个 DWORD（偏移 0x14）。
+        VSS 卷影副本设备不响应此 IOCTL，会走到回落分支。
+        """
+        buf = ctypes.create_string_buffer(64)
+        ret = wintypes.DWORD(0)
+        ok = _k32.DeviceIoControl(
+            self._h, IOCTL_DISK_GET_DRIVE_GEOMETRY_EX, None, 0,
+            buf, ctypes.sizeof(buf), ctypes.byref(ret), None,
+        )
+        if not ok or ret.value < 0x18:
+            return DEFAULT_SECTOR
+        value = struct.unpack_from("<I", buf.raw, 0x14)[0]
+        return value if value in (512, 4096) else DEFAULT_SECTOR
 
     def _query_size(self) -> int:
         buf = ctypes.c_longlong(0)
@@ -164,8 +187,8 @@ def physical_drive_path(n: int) -> str:
     return "\\\\.\\PhysicalDrive%d" % int(n)
 
 
-def open_physical_drive(n: int, sector_size: int = DEFAULT_SECTOR) -> ReadOnlyDevice:
-    """以只读方式打开物理盘 N。"""
+def open_physical_drive(n: int, sector_size: int | None = None) -> ReadOnlyDevice:
+    """以只读方式打开物理盘 N。sector_size=None 时向设备查询（USB 盒 / 4Kn 盘必需）。"""
     return ReadOnlyDevice(physical_drive_path(n), sector_size=sector_size)
 
 
@@ -174,8 +197,8 @@ def shadow_device_path(n: int) -> str:
     return "\\\\?\\GLOBALROOT\\Device\\HarddiskVolumeShadowCopy%d" % int(n)
 
 
-def open_shadow(n: int, size: int, sector_size: int = DEFAULT_SECTOR) -> ReadOnlyDevice:
-    """以只读方式打开卷影副本 N（必须显式给 size）。"""
+def open_shadow(n: int, size: int, sector_size: int | None = None) -> ReadOnlyDevice:
+    """以只读方式打开卷影副本 N（必须显式给 size；扇区大小查不到时回落 512）。"""
     return ReadOnlyDevice(shadow_device_path(n), size=size, sector_size=sector_size)
 
 class ReadOnlyFile:

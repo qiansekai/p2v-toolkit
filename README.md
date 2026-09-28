@@ -38,6 +38,9 @@ python -m p2v plan --disk 3 --take "ESP,MSR,vol:C:" --out 'H:\sys-p2v.vmdk'
 python -m p2v export --disk 3 --take "ESP,MSR,vol:C:" --out 'H:\sys-p2v.vmdk' --apply --json
 #    读写块大小可调：--chunk-mib N（1..256，默认 4）；块越大，Python 层循环与
 #    grain 切分次数越少（128 GiB 在 4 MiB 下约 3.3 万次循环，64 MiB 下约 2 千次）
+#    拆机盘 / USB 硬盘盒里的离线系统盘：用 part:N，并加 --source-mode physical
+#      python -m p2v export --disk 5 --take "ESP,MSR,part:3" --out 'H:\game.vmdk' \
+#          --source-mode physical --apply --json
 
 # 4) 自检产物（结构 + 与源盘内容抽样比对）
 python -m p2v verify --vmdk 'H:\sys-p2v.vmdk' --source-disk 3
@@ -86,6 +89,12 @@ scripts/
 ## 已知边界
 
 - 目标盘容量与源盘一致，未选中的分区保留为未分配空间（thin vmdk 不占空间）
+- **只支持 512 字节逻辑扇区**：扇区大小默认向设备查询（`--sector-size` 只是覆盖），
+  探到 4Kn(4096) 直接拒绝——GPT 的 LBA 与产物 vmdk 都按 512 解释，4Kn 会整体错位
+- `vol:C:` 只对**本机在线的卷**有效；USB 盒里的离线系统盘请用 `part:N`
+  （`vol:` 拿到的是本机盘符，跨盘会被直接拒绝）
+- 源盘**不是本机系统盘**时（拆机盘、外接盘）`--source-mode auto` 会自动跳过 VSS
+  直读物理盘：这类盘没有并发写入，VSS 多余且会误用盘上残留的卷影副本
 - 只负责拷贝：**不重建引导引用、不清理后装驱动**（见上节，必须在 PE 里人工完成两次收尾）
 - 不做驱动注入（与 DG 相同）；换硬件后仍需处理驱动适配
 - 仅支持 GPT + 512B 扇区

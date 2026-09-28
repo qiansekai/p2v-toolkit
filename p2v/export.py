@@ -122,7 +122,7 @@ def run_export(plan: Plan, apply: bool = False, progress=None, chunk_mib=None) -
         w.write_at(layout["backup_entries_lba"] * SECTOR, built["backup_entries"])
         w.write_at(layout["alt_lba"] * SECTOR, built["backup_header"])
 
-        physical = open_physical_drive(plan.source_disk, SECTOR)
+        physical = open_physical_drive(plan.source_disk)
         shadows: dict = {}
         try:
             for seg in data_segments:
@@ -131,7 +131,7 @@ def run_export(plan: Plan, apply: bool = False, progress=None, chunk_mib=None) -
                     src_offset = seg.source_offset
                 elif seg.source_kind == "shadow":
                     if seg.shadow_index not in shadows:
-                        shadows[seg.shadow_index] = open_shadow(seg.shadow_index, seg.size, SECTOR)
+                        shadows[seg.shadow_index] = open_shadow(seg.shadow_index, seg.size)
                     src = shadows[seg.shadow_index]
                     src_offset = seg.source_offset
                 else:

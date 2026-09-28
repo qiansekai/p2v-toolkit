@@ -27,7 +27,7 @@ from .safeio import DeviceError, open_physical_drive
 def _cmd_probe(args: argparse.Namespace) -> int:
     try:
         with open_physical_drive(args.disk) as dev:
-            gpt = parse_gpt(dev, args.sector_size)
+            gpt = parse_gpt(dev, args.sector_size or dev.sector_size)
             payload = {
                 "disk": args.disk,
                 "device": dev.path,
@@ -58,7 +58,8 @@ def _cmd_probe(args: argparse.Namespace) -> int:
 
 def _cmd_plan(args: argparse.Namespace) -> int:
     try:
-        plan = build_plan(args.disk, args.take, args.out, args.sector_size)
+        plan = build_plan(args.disk, args.take, args.out, args.sector_size,
+                          source_mode=args.source_mode)
     except (DeviceError, GptError, PlanError) as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
         return 1
@@ -88,7 +89,8 @@ def _cmd_plan(args: argparse.Namespace) -> int:
 
 def _cmd_export(args: argparse.Namespace) -> int:
     try:
-        plan = build_plan(args.disk, args.take, args.out, args.sector_size)
+        plan = build_plan(args.disk, args.take, args.out, args.sector_size,
+                          source_mode=args.source_mode)
         result = run_export(plan, apply=args.apply, chunk_mib=args.chunk_mib)
     except (DeviceError, GptError, PlanError) as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
@@ -135,7 +137,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("probe", help="只读枚举磁盘分区布局")
     p.add_argument("--disk", type=int, required=True, help="物理盘号，3 表示 PhysicalDrive3")
-    p.add_argument("--sector-size", type=int, default=512)
+    p.add_argument("--sector-size", type=int, default=None,
+                   help="逻辑扇区大小；默认向设备查询（4Kn 盘必须靠它拿到 4096）")
     p.add_argument("--json", action="store_true", help="结构化 JSON 输出")
     p.set_defaults(func=_cmd_probe)
 
@@ -145,7 +148,9 @@ def build_parser() -> argparse.ArgumentParser:
                    type=lambda s: [x.strip() for x in s.split(",") if x.strip()],
                    help="选择器，逗号分隔：ESP / MSR / part:N / vol:C:")
     q.add_argument("--out", required=True, help="目标 vmdk 路径（仅写入计划，不创建）")
-    q.add_argument("--sector-size", type=int, default=512)
+    q.add_argument("--source-mode", choices=("auto", "physical", "shadow"), default="auto",
+                   help="auto=源盘是本机系统盘才走 VSS；physical=强制直读；shadow=强制快照")
+    q.add_argument("--sector-size", type=int, default=None)
     q.add_argument("--json", action="store_true")
     q.set_defaults(func=_cmd_plan)
 
@@ -154,7 +159,9 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--take", required=True,
                    type=lambda s: [x.strip() for x in s.split(",") if x.strip()])
     e.add_argument("--out", required=True)
-    e.add_argument("--sector-size", type=int, default=512)
+    e.add_argument("--source-mode", choices=("auto", "physical", "shadow"), default="auto",
+                   help="auto=源盘是本机系统盘才走 VSS；physical=强制直读；shadow=强制快照")
+    e.add_argument("--sector-size", type=int, default=None)
     e.add_argument("--apply", action="store_true", help="真正写盘（不加则只预检）")
     e.add_argument("--chunk-mib", type=int, default=None,
                    help="读写块大小（MiB，%d..%d，默认 %d）；调大可减少 Python 层循环开销"

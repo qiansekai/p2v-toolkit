@@ -6,6 +6,7 @@ plan 阶段**纯只读**，不创建任何文件；执行阶段（export）才�
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -122,10 +123,13 @@ def latest_shadow_index_for_volume(letter: str) -> int | None:
 # 计划构建
 # ---------------------------------------------------------------------------
 
-def resolve_selector(gpt: GptDisk, selector: str) -> Partition:
+def resolve_selector(gpt: GptDisk, selector: str,
+                     disk: int | None = None) -> Partition:
     """选择器 -> 源盘分区。
 
     支持：ESP / MSR / part:N / vol:C:
+    disk 传入源盘号后，vol: 会校验该盘符确实落在源盘上——跨机拆盘（USB 盒里的
+    离线系统盘）必须用 part:N，否则 vol:C: 拿到的是本机 C: 的分区号。
     """
     sel = selector.strip()
     upper = sel.upper()
@@ -148,6 +152,10 @@ def resolve_selector(gpt: GptDisk, selector: str) -> Partition:
     if sel.lower().startswith("vol:"):
         letter = sel.split(":", 1)[1]
         info = partition_for_volume(letter)
+        if disk is not None and info["disk"] != disk:
+            raise PlanError(
+                "volume %s: 位于盘 #%d，不是源盘 #%d；跨盘 / 离线拆机盘请改用 part:N"
+                % (letter.rstrip(":\\"), info["disk"], disk))
         for p in gpt.partitions:
             if p.index == info["partition"]:
                 return p
@@ -156,15 +164,33 @@ def resolve_selector(gpt: GptDisk, selector: str) -> Partition:
     raise PlanError("unsupported selector: %r (use ESP / MSR / part:N / vol:C:)" % selector)
 
 
-def build_plan(disk: int, take: list, out_path: str, sector_size: int = SECTOR,
-               keep_disk_guid: bool = True) -> Plan:
+def host_system_disk() -> int | None:
+    """本机 %SystemDrive% 所在的物理盘号（只读）。取不到时返回 None。"""
+    letter = os.environ.get("SystemDrive", "C:").rstrip(":\\")
+    try:
+        return partition_for_volume(letter)["disk"]
+    except Exception:
+        return None
+
+
+def build_plan(disk: int, take: list, out_path: str, sector_size: int | None = None,
+               keep_disk_guid: bool = True, source_mode: str = "auto") -> Plan:
     """只读探测并生成计划。
 
     目标盘容量 = 源盘容量；被选中的分区**沿用原偏移与 GUID**（这样 BCD 与
     MountedDevices 的引用天然继续有效，不会再出现 C: -> V: 的盘符错乱）。
     未被选中的分区在目标盘上留作未分配空间（thin vmdk 下不占空间）。
     """
+    if source_mode not in ("auto", "physical", "shadow"):
+        raise PlanError("unknown source-mode: %r (expected auto|physical|shadow)" % source_mode)
+
     with open_physical_drive(disk, sector_size) as dev:
+        sector_size = dev.sector_size          # None -> 用设备探测到的真实扇区
+        if sector_size != SECTOR:
+            raise PlanError(
+                "源盘 #%d 的逻辑扇区是 %d 字节；当前版本只支持 512B 逻辑扇区"
+                "（GPT 的 LBA 与产物 vmdk 都按 512 解释，4Kn 会让偏移整体错位）"
+                % (disk, sector_size))
         gpt = parse_gpt(dev, sector_size)
         source_capacity = dev.size
         source_device = dev.path
@@ -173,7 +199,7 @@ def build_plan(disk: int, take: list, out_path: str, sector_size: int = SECTOR,
 
     picked: list = []
     for sel in take:
-        part = resolve_selector(gpt, sel)
+        part = resolve_selector(gpt, sel, disk)
         if part not in picked:
             picked.append(part)
     if not picked:
@@ -210,11 +236,26 @@ def build_plan(disk: int, take: list, out_path: str, sector_size: int = SECTOR,
     plan.segments.append(Segment("gpt-backup", layout["alt_lba"] * sector_size,
                                  sector_size, "generated"))
 
+    sys_disk = host_system_disk()
+    if source_mode == "physical":
+        use_shadow, shadow_policy = False, "source-mode=physical：跳过 VSS，直读物理盘"
+    elif source_mode == "shadow":
+        use_shadow, shadow_policy = True, "source-mode=shadow：强制使用卷影副本"
+    else:
+        use_shadow = sys_disk is not None and disk == sys_disk
+        if use_shadow:
+            shadow_policy = ("auto：源盘 #%d 就是本机系统盘，优先用卷影副本保证一致性" % disk)
+        else:
+            shadow_policy = ("auto：源盘 #%d 不是本机系统盘（本机系统盘 #%s），"
+                             "无并发写入，直读物理盘（离线拆机盘走的就是这条）"
+                             % (disk, sys_disk if sys_disk is not None else "?"))
+    plan.notes.append(shadow_policy)
+
     for p in picked:
         source_kind = "physical"
         shadow_index = None
         source_offset = p.offset
-        if p.type_guid == TYPE_BASIC:
+        if p.type_guid == TYPE_BASIC and use_shadow:
             # 系统/数据卷：优先用 VSS 快照保证一致性
             idx = None
             try:
@@ -234,10 +275,15 @@ def build_plan(disk: int, take: list, out_path: str, sector_size: int = SECTOR,
                 plan.notes.append(
                     "partition #%d (%s) 将从卷影副本 %d 读取以保证一致性"
                     % (p.index, p.name or p.type_name, idx))
+            elif source_mode == "shadow":
+                raise PlanError(
+                    "source-mode=shadow 但 partition #%d 没有可用卷影副本" % p.index)
             else:
                 plan.notes.append(
                     "partition #%d 未找到可用卷影副本，将直读物理盘（crash-consistent）"
                     % p.index)
+        elif p.type_guid == TYPE_BASIC:
+            plan.notes.append("partition #%d 直读物理盘（%s）" % (p.index, shadow_policy))
 
         plan.segments.append(Segment(
             role="partition",
