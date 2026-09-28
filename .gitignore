@@ -1,0 +1,24 @@
+# artifacts (never commit disk images / logs)
+*.vmdk
+*.raw
+*.img
+*.bin
+*.vhd
+*.vhdx
+out/
+artifacts/
+logs/
+*.log
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+# local state
+*.plan.json
+state*.json
+.p2v-state/
+# credentials
+.env
+*.credentials*
+.vm-credentials.json
