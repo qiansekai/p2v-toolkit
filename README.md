@@ -67,6 +67,26 @@ python -m p2v verify --vmdk 'H:\sys-p2v.vmdk' --source-disk 3
    不删分区、不改 GUID）；
 3. 关机，改回从硬盘启动验证。
 
+## USB 硬盘盒里的拆机盘（离线系统盘）
+
+跨机拆盘有两个坑：`vol:C:` 解析的是**本机**盘符，以及 Windows 会在插上的瞬间挂载并回写
+NTFS 日志。`scripts/p2v-from-usb.ps1` 把该做的都包住：
+
+```powershell
+mountvol /N     # 接入【之前】执行：禁止自动挂载新卷
+# …插盘… 用 Get-Disk 确认盘号
+.\scripts\p2v-from-usb.ps1 -Disk 5 -Take "ESP,MSR,part:3" -Out 'H:\game-p2v.vmdk'
+mountvol /E     # 收尾恢复自动挂载
+```
+
+脚本做的事：拒绝把本机系统盘当源盘、检查 BitLocker、用 `part:N` + `--source-mode physical` 跑
+probe/plan/export/verify，并**可选把源盘整盘设为只读**（`Set-Disk -IsReadOnly`，partmgr 层，
+不写源盘任何扇区），在 `finally` 里恢复并核对 `IsReadOnly`。
+
+- `-DryRun`：只做检查并打印将要执行的命令，不设只读、不写盘
+- `-NoLock`：跳过只读加锁
+- `-KeepReadOnly`：跑完保留只读（默认一定恢复；恢复失败会打印手工清除命令并以非零码退出）
+
 ## 依赖
 
 运行：仅 Python 标准库（ctypes / struct / zlib / json）+ Windows 自带 `powershell`。
@@ -84,7 +104,8 @@ p2v/
   export.py   按计划导出（默认 dry-run）
   verify.py   产物自检
 scripts/
-  expand-system-in-pe.cmd   PE 内可选的系统分区扩容
+  expand-system-in-pe.cmd   PE 内可选的系统分区扩容（未实机验证）
+  p2v-from-usb.ps1          USB 拆机盘导出包装：安全闸 + 可选整盘只读 + 顺序跑四步
 ```
 
 ## 已知边界
