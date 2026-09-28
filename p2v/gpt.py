@@ -151,3 +151,95 @@ def parse_gpt(dev, sector_size: int = 512) -> GptDisk:
         header_crc_ok=header_ok,
         entries_crc_ok=entries_ok,
     )
+
+# ---------------------------------------------------------------------------
+# GPT 构造
+# ---------------------------------------------------------------------------
+
+PROTECTIVE_MBR_TYPE = 0xEE
+
+
+def build_protective_mbr(capacity_sectors: int, sector_size: int = 512) -> bytes:
+    """保护性 MBR：单个 0xEE 分区项覆盖整盘。"""
+    mbr = bytearray(sector_size)
+    entry = 0x1BE
+    mbr[entry + 0] = 0x00            # boot flag
+    mbr[entry + 1:entry + 4] = b"\x00\x02\x00"   # start CHS (0/0/2)
+    mbr[entry + 4] = PROTECTIVE_MBR_TYPE
+    mbr[entry + 5:entry + 8] = b"\xff\xff\xff"   # end CHS
+    struct.pack_into("<I", mbr, entry + 8, 1)
+    end_lba = min(capacity_sectors - 1, 0xFFFFFFFF)
+    struct.pack_into("<I", mbr, entry + 12, end_lba)
+    mbr[510] = 0x55
+    mbr[511] = 0xAA
+    return bytes(mbr)
+
+
+def build_gpt(capacity_sectors: int, disk_guid: uuid.UUID, partitions: list,
+              sector_size: int = 512, num_entries: int = 128) -> dict:
+    """构造 GPT 主/备结构与保护性 MBR。
+
+    partitions: list[Partition]（用其 type_guid / part_guid / first_lba / last_lba /
+                attributes / name；part_guid 建议沿用源盘值，避免 MountedDevices 失配）
+    返回 dict，键为各结构在本盘内的字节位置 -> 内容。
+    """
+    entries_sectors = (num_entries * ENTRY_SIZE) // sector_size
+    entries_lba = 2
+    backup_entries_lba = capacity_sectors - entries_sectors
+    first_usable = entries_lba + entries_sectors
+    last_usable = backup_entries_lba - 1
+    alt_lba = capacity_sectors - 1
+    my_lba = 1
+
+    for p in partitions:
+        if p.first_lba < first_usable or p.last_lba > last_usable:
+            raise GptError("partition %d out of usable range" % p.index)
+
+    table = bytearray(num_entries * ENTRY_SIZE)
+    for slot, p in enumerate(partitions):
+        off = slot * ENTRY_SIZE
+        table[off:off + 16] = p.type_guid.bytes_le
+        table[off + 16:off + 32] = p.part_guid.bytes_le
+        struct.pack_into("<QQQ", table, off + 32, p.first_lba, p.last_lba, p.attributes)
+        name = p.name.encode("utf-16-le")
+        table[off + 56:off + 56 + len(name)] = name
+    entries_crc = _crc32(bytes(table))
+
+    def _header(this_lba: int, other_lba: int, part_lba: int) -> bytes:
+        hdr = bytearray(92)
+        hdr[0:8] = GPT_SIGNATURE
+        struct.pack_into("<I", hdr, 8, GPT_REVISION)
+        struct.pack_into("<I", hdr, 12, 92)          # header size
+        struct.pack_into("<I", hdr, 16, 0)           # crc placeholder
+        struct.pack_into("<I", hdr, 20, 0)           # reserved
+        struct.pack_into("<Q", hdr, 24, this_lba)
+        struct.pack_into("<Q", hdr, 32, other_lba)
+        struct.pack_into("<Q", hdr, 40, first_usable)
+        struct.pack_into("<Q", hdr, 48, last_usable)
+        hdr[56:72] = disk_guid.bytes_le
+        struct.pack_into("<Q", hdr, 72, part_lba)
+        struct.pack_into("<I", hdr, 80, num_entries)
+        struct.pack_into("<I", hdr, 84, ENTRY_SIZE)
+        struct.pack_into("<I", hdr, 88, entries_crc)
+        crc = _crc32(bytes(hdr))
+        struct.pack_into("<I", hdr, 16, crc)
+        return bytes(hdr)
+
+    primary = _header(my_lba, alt_lba, entries_lba)
+    backup = _header(alt_lba, my_lba, backup_entries_lba)
+
+    return {
+        "mbr": build_protective_mbr(capacity_sectors, sector_size),
+        "primary_header": primary,
+        "primary_entries": bytes(table),
+        "backup_entries": bytes(table),
+        "backup_header": backup,
+        "layout": {
+            "entries_lba": entries_lba,
+            "entries_sectors": entries_sectors,
+            "backup_entries_lba": backup_entries_lba,
+            "first_usable_lba": first_usable,
+            "last_usable_lba": last_usable,
+            "alt_lba": alt_lba,
+        },
+    }

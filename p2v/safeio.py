@@ -16,6 +16,7 @@ r"""只读设备访问层（Windows）。
 from __future__ import annotations
 
 import ctypes
+import os
 from ctypes import wintypes
 
 GENERIC_READ = 0x80000000
@@ -176,3 +177,44 @@ def shadow_device_path(n: int) -> str:
 def open_shadow(n: int, size: int, sector_size: int = DEFAULT_SECTOR) -> ReadOnlyDevice:
     """以只读方式打开卷影副本 N（必须显式给 size）。"""
     return ReadOnlyDevice(shadow_device_path(n), size=size, sector_size=sector_size)
+
+class ReadOnlyFile:
+    """只读文件/镜像设备（用于校验产物）。接口与 ReadOnlyDevice 一致。"""
+
+    __slots__ = ("path", "sector_size", "_f", "_size")
+
+    def __init__(self, path: str, sector_size: int = DEFAULT_SECTOR) -> None:
+        self.path = path
+        self.sector_size = int(sector_size)
+        self._f = open(path, "rb")
+        self._size = os.path.getsize(path)
+
+    @property
+    def size(self) -> int:
+        return self._size
+
+    @property
+    def total_sectors(self) -> int:
+        return self._size // self.sector_size
+
+    def read_at(self, offset: int, size: int) -> bytes:
+        if offset < 0 or size < 0:
+            raise ValueError("negative offset/size")
+        if offset + size > self._size:
+            raise ValueError("read out of range: %d+%d > %d" % (offset, size, self._size))
+        self._f.seek(offset)
+        data = self._f.read(size)
+        if len(data) != size:
+            raise DeviceError("short read at %d: %d/%d" % (offset, len(data), size))
+        return data
+
+    def close(self) -> None:
+        if self._f:
+            self._f.close()
+            self._f = None
+
+    def __enter__(self) -> "ReadOnlyFile":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()

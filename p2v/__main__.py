@@ -17,6 +17,8 @@ import json
 import sys
 
 from .gpt import GptError, parse_gpt
+from .export import run_export
+from .plan import PlanError, build_plan
 from .safeio import DeviceError, open_physical_drive
 
 
@@ -52,6 +54,52 @@ def _cmd_probe(args: argparse.Namespace) -> int:
     return 0 if payload["ok"] else 2
 
 
+def _cmd_plan(args: argparse.Namespace) -> int:
+    try:
+        plan = build_plan(args.disk, args.take, args.out, args.sector_size)
+    except (DeviceError, GptError, PlanError) as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(plan.to_json())
+    else:
+        d = plan.as_dict()
+        print("source disk %d  %s  %.2f GiB" % (
+            d["source_disk"], d["source_device"], d["source_capacity_gib"]))
+        print("target %s  %.2f GiB  (disk_guid %s)" % (
+            d["target_path"], d["target_capacity_gib"], d["target_disk_guid"]))
+        print("segments:")
+        for s in d["segments"]:
+            src = s["source_kind"]
+            if src == "shadow":
+                src += "#%s" % s["shadow_index"]
+            elif src == "physical":
+                src += "@%d" % s["source_offset"]
+            print("  %-18s dest=%-14d size=%-14d src=%s" % (
+                s["role"], s["dest_offset"], s["size"], src))
+        for n in d["notes"]:
+            print("note: " + n)
+
+    return 0
+
+
+def _cmd_export(args: argparse.Namespace) -> int:
+    try:
+        plan = build_plan(args.disk, args.take, args.out, args.sector_size)
+        result = run_export(plan, apply=args.apply)
+    except (DeviceError, GptError, PlanError) as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    else:
+        for k, v in result.items():
+            print("%-16s %s" % (k, v))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="p2v", description="agent 友好的 P2V 工具链（源设备只读）")
     sub = ap.add_subparsers(dest="command", required=True)
@@ -61,6 +109,26 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--sector-size", type=int, default=512)
     p.add_argument("--json", action="store_true", help="结构化 JSON 输出")
     p.set_defaults(func=_cmd_probe)
+
+    q = sub.add_parser("plan", help="生成导出计划（纯只读，不创建文件）")
+    q.add_argument("--disk", type=int, required=True)
+    q.add_argument("--take", required=True,
+                   type=lambda s: [x.strip() for x in s.split(",") if x.strip()],
+                   help="选择器，逗号分隔：ESP / MSR / part:N / vol:C:")
+    q.add_argument("--out", required=True, help="目标 vmdk 路径（仅写入计划，不创建）")
+    q.add_argument("--sector-size", type=int, default=512)
+    q.add_argument("--json", action="store_true")
+    q.set_defaults(func=_cmd_plan)
+
+    e = sub.add_parser("export", help="按计划导出（默认 dry-run，--apply 才写盘）")
+    e.add_argument("--disk", type=int, required=True)
+    e.add_argument("--take", required=True,
+                   type=lambda s: [x.strip() for x in s.split(",") if x.strip()])
+    e.add_argument("--out", required=True)
+    e.add_argument("--sector-size", type=int, default=512)
+    e.add_argument("--apply", action="store_true", help="真正写盘（不加则只预检）")
+    e.add_argument("--json", action="store_true")
+    e.set_defaults(func=_cmd_export)
 
     return ap
 
