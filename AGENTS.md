@@ -1,7 +1,7 @@
 # p2v-toolkit
 
-agent 友好的 P2V 工具链：把物理盘上的「系统卷 + ESP」做成可引导 vmdk，
-并可重组目标盘分区布局（等价 DiskGenius 的「在线克隆 + 布局重组」，但更省空间、不动原 GUID）。
+agent 友好的 P2V 工具链：把物理盘上的「系统卷 + ESP」做成可引导 vmdk。
+许可证 **GPL-3.0-only** —— `LICENSE` 不得删除或替换。
 
 ## 定位
 
@@ -24,15 +24,29 @@ agent 友好的 P2V 工具链：把物理盘上的「系统卷 + ESP」做成可
 
 ```
 p2v/
-  safeio.py    只读设备访问（物理盘 / VSS 快照）+ 安全护栏
+  safeio.py    只读设备访问（物理盘 / VSS 快照 / 文件）+ 安全护栏
   gpt.py       GPT 解析与构造（含 CRC32）
   vmdk.py      sparse vmdk 读写
   vss.py       卷影副本枚举与只读打开（工具自身不创建快照）
+  plan.py      导出计划（纯只读）
+  export.py    按计划导出（默认 dry-run）
+  verify.py    产物自检
   __main__.py  CLI 入口：probe / plan / export / verify
+tests/         单测（标准库 unittest，无需真盘）
 scripts/
   p2v-from-usb.ps1          USB 拆机盘导出包装（安全闸 + 可选整盘只读 + 顺序跑四步）
   expand-system-in-pe.cmd   PE 内可选的系统分区扩容（未实机验证）
+pyproject.toml / CHANGELOG.md / LICENSE / .github/workflows/ci.yml
 ```
+
+## 开发约定
+
+- 测试：`python -m unittest discover -s tests -t .`（25 项，无需真盘、无需管理员权限 —— 设备层被内存替身替换）
+- **改 `export` / `vmdk` / `gpt` 必须跑测试**：分块循环曾因变量复用出现「首轮后必崩」，
+  而当时没有任何自动化回归，只能靠真盘手工跑
+- 新增文件保留 `# SPDX-License-Identifier: GPL-3.0-only` 头
+- 未经实机验证的能力必须在 README 与 `CHANGELOG.md` 标注，不要写成可用功能
+- 提交信息用中文 + 语义前缀（fix / feat / docs / test / chore）
 
 ## 外部契约（改代码前注意）
 
@@ -42,7 +56,9 @@ scripts/
   `verify` 有对应断言；不要改回「重新计算」
 - **VSS 只在源盘就是本机系统盘时才用**（`--source-mode auto`）：拆机盘 / 外接盘直读物理盘，
   它们没有并发写入，走 VSS 反而会误用盘上残留的卷影副本
-- **`vol:C:` 只对本机在线的卷有效**：跨机拆盘必须用 `part:N`（跨盘会被直接拒绝）
+- **`vol:C:` 只对本机在线的卷有效**：跨机拆盘必须用 `part:N`（跨盘会被直接拒绝）；
+  盘符限定为单个字母（会拼进 PowerShell，禁止放宽）
+- **`verify --source-shadow` 必须同时给 `--source-disk`**：卷影副本是卷级的，不含分区表
 
 ## 已验证的关键事实（2026-09-28）
 
@@ -52,3 +68,8 @@ scripts/
   所谓「在线一致整盘克隆」= 逐卷 VSS + 分区表重组
 - StarWind V2V Converter 9.0.0.202 的**整盘 CLI 路径**为裸读（日志无 VSS 调用）
 - 本机 `diskshadow` 缺失，`vssadmin` / `wbadmin` 可用
+
+## 未实机验证（不要当成可用功能）
+
+- `scripts/expand-system-in-pe.cmd`：PE 内系统分区扩容，从未在真实 PE 里跑过
+- 4Kn 盘、>2 TiB 源盘、多系统卷组合：只在 512B / 单系统卷场景实测
