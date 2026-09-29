@@ -1,11 +1,12 @@
+# SPDX-License-Identifier: GPL-3.0-only
 """CLI 入口：python -m p2v <command> [options]
 
 子命令
 ------
-probe   只读枚举磁盘分区布局
-plan    生成导出计划（dry-run，待实现）
-export  按计划导出（需 --apply，待实现）
-verify  校验产物（待实现）
+probe   只读枚举磁盘布局（GPT 解析 + CRC 自检）
+plan    生成导出计划（纯只读，不创建任何文件）
+export  按计划导出（默认 dry-run，需 --apply 才落盘）
+verify  校验产物（自包含解析 vmdk，可选与源盘 / 卷影副本比对）
 
 约定：支持 --json；退出码 0=成功 / 2=校验失败 / 1=错误。
 """

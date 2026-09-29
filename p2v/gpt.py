@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-only
 """GPT 解析与构造（含 CRC32 自检）。
 
 分区的 GUID 在 GPT 里是 mixed-endian，统一用 uuid.UUID(bytes_le=...) 处理。

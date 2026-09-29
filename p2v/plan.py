@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-only
 """导出计划：把"复制什么、放到哪"显式化成可审阅的数据结构。
 
 plan 阶段**纯只读**，不创建任何文件；执行阶段（export）才落盘。
@@ -7,14 +8,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import struct
 import subprocess
 import uuid
 from dataclasses import asdict, dataclass, field
 
 from .gpt import (
-    TYPE_BASIC, TYPE_ESP, TYPE_MSR, GptDisk, Partition, build_gpt,
-    build_protective_mbr, parse_gpt,
+    TYPE_BASIC, TYPE_ESP, TYPE_MSR, GptDisk, Partition, build_gpt, parse_gpt,
 )
 from .safeio import DEFAULT_SECTOR as SECTOR, open_physical_drive
 
@@ -88,9 +89,21 @@ def _ps_json(script: str):
     return json.loads(text) if text else None
 
 
+def _volume_letter(letter: str) -> str:
+    """校验并规范化盘符。
+
+    盘符会被拼进 PowerShell 脚本，因此必须限定为单个字母 —— 否则
+    `vol:C:; <任意命令>; #` 这类选择器可以直接注入并执行任意命令。
+    """
+    lt = (letter or "").strip().rstrip(":\\").strip()
+    if not re.fullmatch(r"[A-Za-z]", lt):
+        raise PlanError("非法盘符 %r：只接受单个字母（例如 C）" % letter)
+    return lt.upper()
+
+
 def partition_for_volume(letter: str) -> dict:
     """查盘符对应的分区（只读）。返回 {disk, partition, guid}。"""
-    lt = letter.rstrip(":\\")
+    lt = _volume_letter(letter)
     data = _ps_json(
         "Get-Partition -DriveLetter %s | Select-Object DiskNumber,PartitionNumber,Guid | "
         "ConvertTo-Json -Compress" % lt
@@ -106,9 +119,9 @@ def partition_for_volume(letter: str) -> dict:
 
 def latest_shadow_index_for_volume(letter: str) -> int | None:
     """取该卷最新的可用卷影副本序号（只读枚举，不创建）。"""
-    from .vss import list_shadows, volume_size_bytes  # 局部导入避免环依赖
+    from .vss import list_shadows  # 局部导入避免环依赖
 
-    lt = letter.rstrip(":\\")
+    lt = _volume_letter(letter)
     vol_guid = _ps_json(
         "Get-Volume -DriveLetter %s | Select-Object -ExpandProperty UniqueId | "
         "ConvertTo-Json -Compress" % lt

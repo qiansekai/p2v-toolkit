@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-only
 r"""只读设备访问层（Windows）。
 
 安全契约
@@ -86,8 +87,13 @@ class ReadOnlyDevice:
             )
         self.path = path
         self._h = handle
-        self.sector_size = int(sector_size) if sector_size else self._query_sector_size()
-        self._size = int(size) if size is not None else self._query_size()
+        try:
+            self.sector_size = int(sector_size) if sector_size else self._query_sector_size()
+            self._size = int(size) if size is not None else self._query_size()
+        except Exception:
+            # 探询失败同样要关句柄：否则会一直占住物理盘
+            self.close()
+            raise
 
     # -- metadata ---------------------------------------------------------
     @property

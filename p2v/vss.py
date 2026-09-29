@@ -1,10 +1,12 @@
+# SPDX-License-Identifier: GPL-3.0-only
 """VSS 卷影副本访问。
 
 安全姿态
 --------
 - 默认**只枚举与读取现有快照**，不改变系统 VSS 状态。
-- 创建/删除快照会占用卷空间并改变系统状态，必须由调用方显式发起
-  （CLI 层对应 --create-shadow），且必须显式卸载/删除自己创建的快照。
+- 创建/删除快照会占用卷空间并改变系统状态，本版本**不提供**创建快照的能力
+  （CLI 没有 --create-shadow 之类的开关）。需要一致性快照时，请先用系统工具
+  （vssadmin / wbadmin 等）创建，再让本工具以只读方式打开。
 
 注意：VSS 卷影副本是**卷级**的，物理设备层面不存在"整盘快照"。
 本工具因此采用：ESP 从物理盘直读（几乎不变），系统卷从 VSS 快照读（一致）。
@@ -13,6 +15,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 
 from .safeio import ReadOnlyDevice, shadow_device_path
@@ -67,8 +70,10 @@ def list_shadows() -> list:
 
 
 def volume_size_bytes(drive_letter: str) -> int:
-    """查卷容量（字节）。"""
-    letter = drive_letter.rstrip(":\\")
+    """查卷容量（字节）。盘符限定为单个字母（会被拼进 PowerShell 脚本）。"""
+    letter = (drive_letter or "").strip().rstrip(":\\").strip()
+    if not re.fullmatch(r"[A-Za-z]", letter):
+        raise VssError("非法盘符 %r：只接受单个字母（例如 C）" % drive_letter)
     script = (
         "Get-CimInstance Win32_Volume -Filter \"DriveLetter='%s:'\" | "
         "Select-Object -ExpandProperty Capacity" % letter

@@ -1,3 +1,4 @@
+REM SPDX-License-Identifier: GPL-3.0-only
 @echo off
 REM ============================================================
 REM  expand-system-in-pe.cmd

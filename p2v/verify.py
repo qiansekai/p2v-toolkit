@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-only
 """产物自检：直接解析 vmdk 内部结构，不依赖外部工具。
 
 校验项：
@@ -15,7 +16,7 @@ from __future__ import annotations
 
 import struct
 
-from .gpt import ENTRY_SIZE, GPT_SIGNATURE, TYPE_BASIC, _crc32, parse_gpt
+from .gpt import GPT_SIGNATURE, TYPE_BASIC, _crc32, parse_gpt
 from .safeio import open_physical_drive, open_shadow
 from .vmdk import SparseVmdkReader
 
@@ -59,7 +60,15 @@ def verify_vmdk(path: str, source_disk: int | None = None,
         checks.append({"name": "vmdk_header", "ok": True,
                        "detail": "monolithicSparse, capacity=%d sectors" % reader.capacity_sectors})
 
-        gpt = parse_gpt(reader)
+        try:
+            gpt = parse_gpt(reader)
+        except Exception as exc:
+            # 结构已损坏：按「校验失败」返回明细，而不是把异常抛给 CLI
+            # （那会变成 exit 1「错误」，而产物损坏应当是 exit 2「校验失败」）
+            checks.append({"name": "gpt_primary", "ok": False,
+                           "detail": "GPT 解析失败：%s" % exc})
+            result["ok"] = False
+            return result
         result["gpt"] = gpt.as_dict()
         checks.append({
             "name": "gpt_primary",
@@ -77,8 +86,14 @@ def verify_vmdk(path: str, source_disk: int | None = None,
             "detail": str(backup),
         })
 
-        if source_disk is not None or source_shadow is not None:
-            with open_physical_drive(source_disk if source_disk is not None else 3) as src:
+        if source_shadow is not None and source_disk is None:
+            # 卷影副本是卷级的，不含分区表：没有源盘就无法定位源 GPT / 磁盘签名。
+            # 旧实现会静默回落到 PhysicalDrive3，可能比对到错误的盘并给出错误结论。
+            raise ValueError(
+                "--source-shadow 必须与 --source-disk 一起给出（卷影副本不含分区表）")
+
+        if source_disk is not None:
+            with open_physical_drive(source_disk) as src:
                 src_gpt = parse_gpt(src)
             src_by_guid = {str(p.part_guid): p for p in src_gpt.partitions}
             missing = [str(p.part_guid) for p in gpt.partitions
@@ -88,7 +103,7 @@ def verify_vmdk(path: str, source_disk: int | None = None,
 
             # 元数据忠实性：磁盘签名 / 保护性 MBR 末 LBA / 分区 attributes 必须与源盘
             # 逐字段一致。这三项历史上被硬编码过，旧版 verify 全绿也照样"克隆不忠实"。
-            with open_physical_drive(source_disk if source_disk is not None else 3) as src:
+            with open_physical_drive(source_disk) as src:
                 src_mbr = src.read_at(0, 512)
             prod_mbr = reader.read_at(0, 512)
             sig_p = struct.unpack_from("<I", prod_mbr, 0x1B8)[0]
@@ -140,7 +155,7 @@ def verify_vmdk(path: str, source_disk: int | None = None,
                             })
                     else:
                         take = min(sample_bytes, p.size_bytes)
-                        with open_physical_drive(source_disk if source_disk is not None else 3) as src:
+                        with open_physical_drive(source_disk) as src:
                             b = src.read_at(src_p.offset, take)
                         a = reader.read_at(p.offset, take)
                         checks.append({
@@ -151,8 +166,6 @@ def verify_vmdk(path: str, source_disk: int | None = None,
             finally:
                 if shadow_dev is not None:
                     shadow_dev.close()
-
-        result["layout"] = {"gts": None}
 
     # 布局自洽性（不依赖 reader 的封装，直接读文件头）
     try:

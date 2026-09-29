@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-only
 """按 plan 执行导出。
 
 默认 dry-run：只有 apply=True 才创建目标文件。
@@ -11,10 +12,12 @@ import os
 import time
 import uuid
 
-from .gpt import ENTRY_SIZE, Partition, build_gpt, build_protective_mbr
+from .gpt import Partition, build_gpt
 from .plan import Plan, PlanError, Segment
-from .safeio import DEFAULT_SECTOR, DEFAULT_SECTOR as SECTOR, open_physical_drive, open_shadow
+from .safeio import DEFAULT_SECTOR, open_physical_drive, open_shadow
 from .vmdk import SparseVmdkWriter
+
+SECTOR = DEFAULT_SECTOR
 
 MIB = 1024 * 1024
 DEFAULT_CHUNK_MIB = 4

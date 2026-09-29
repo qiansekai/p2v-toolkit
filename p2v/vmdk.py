@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-only
 """Sparse VMDK（monolithicSparse）写出。
 
 格式（逆向自 qemu-img 产出的同类型文件，实测字段）：
@@ -112,11 +113,6 @@ class SparseVmdkWriter:
         self._f.flush()
 
     # -- data -------------------------------------------------------------
-    def write_zeros_until(self, offset: int) -> None:
-        """显式跳空洞（语义上等于写零，thin 下不落盘）。"""
-        if offset < 0:
-            raise ValueError("negative offset")
-
     def write_grain(self, grain_index: int, data: bytes) -> None:
         """写入第 grain_index 个 grain（64 KiB，允许最后一块短）。"""
         expected = GRAIN_SECTORS * SECTOR
@@ -275,7 +271,15 @@ class SparseVmdkReader:
         self.sector_size = sector_size
         self._f = open(path, "rb")
         self._gt_cache = {}
+        try:
+            self._read_header()
+        except Exception:
+            # 构造失败时不要泄漏句柄（Windows 上会一直占住文件）
+            self._f.close()
+            self._f = None
+            raise
 
+    def _read_header(self) -> None:
         header = self._f.read(512)
         (magic, version, flags, capacity, grain, desc_off, desc_size,
          num_gtes, rgd_off, gd_off, overhead) = struct.unpack_from("<IIIQQQQIQQQ", header, 0)
@@ -295,7 +299,7 @@ class SparseVmdkReader:
 
         num_gts = (capacity + grain - 1) // grain
         num_gd_entries = (num_gts + num_gtes - 1) // num_gtes
-        self._f.seek(gd_off * sector_size)
+        self._f.seek(gd_off * self.sector_size)
         raw_gd = self._f.read(num_gd_entries * 4)
         self._gd = list(struct.unpack("<%dI" % num_gd_entries, raw_gd))
 

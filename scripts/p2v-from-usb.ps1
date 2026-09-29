@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-only
 ﻿<#
 .SYNOPSIS
     把 USB 硬盘盒里的拆机盘（离线系统盘）安全导出为 vmdk。
