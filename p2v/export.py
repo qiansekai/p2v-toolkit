@@ -83,7 +83,7 @@ def run_export(plan: Plan, apply: bool = False, progress=None, chunk_mib=None) -
     chunk_mib: 读写块大小（MiB）。调大可减少 Python 层循环与 grain 切分次数；
     None 表示用 DEFAULT_CHUNK_MIB。
     """
-    chunk = resolve_chunk_bytes(chunk_mib)
+    chunk_bytes = resolve_chunk_bytes(chunk_mib)
     data_segments = [s for s in plan.segments if s.role == "partition"]
     total_bytes = sum(s.size for s in data_segments)
 
@@ -96,7 +96,7 @@ def run_export(plan: Plan, apply: bool = False, progress=None, chunk_mib=None) -
             "data_segments": len(data_segments),
             "data_bytes": total_bytes,
             "data_gib": round(total_bytes / 1024 ** 3, 2),
-            "chunk_mib": chunk // MIB,
+            "chunk_mib": chunk_bytes // MIB,
             "message": "dry-run only; pass apply=True (CLI --apply) to write",
             "manual_steps": MANUAL_POST_STEPS,
         }
@@ -146,17 +146,17 @@ def run_export(plan: Plan, apply: bool = False, progress=None, chunk_mib=None) -
                 copied = 0
                 while copied < seg.size:
                     if copied >= readable:
-                        take = min(chunk, seg.size - copied)
-                        chunk = b"\x00" * take
+                        # 卷影副本尾部补零：全零 buf 不占 grain（thin）
+                        buf = b"\x00" * min(chunk_bytes, seg.size - copied)
                     else:
-                        take = min(chunk, readable - copied)
+                        want = min(chunk_bytes, readable - copied)
                         try:
-                            chunk = src.read_at(src_offset + copied, take)
+                            buf = src.read_at(src_offset + copied, want)
                         except Exception as exc:
                             raise PlanError("read failed at partition %s offset %d: %s"
                                             % (seg.partition_index, copied, exc))
-                    w.write_at(seg.dest_offset + copied, chunk)
-                    copied += take
+                    w.write_at(seg.dest_offset + copied, buf)
+                    copied += len(buf)
                     if progress:
                         progress(seg, copied)
                 if padded:
@@ -180,7 +180,7 @@ def run_export(plan: Plan, apply: bool = False, progress=None, chunk_mib=None) -
         "allocated_bytes": stats["allocated_bytes"],
         "elapsed_sec": round(elapsed, 1),
         "throughput_mb_s": round(total_bytes / 1024 ** 2 / max(elapsed, 1e-6), 1),
-        "chunk_mib": chunk // MIB,
+        "chunk_mib": chunk_bytes // MIB,
         "warnings": warnings,
         "manual_steps": MANUAL_POST_STEPS,
     }
