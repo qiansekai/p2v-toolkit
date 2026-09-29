@@ -27,9 +27,9 @@ dependencies = []
 [project.scripts]
 p2v = "p2v.__main__:main"
 
-# 仓库地址在公开后补上，例如：
-# [project.urls]
-# Source = "https://github.com/<owner>/p2v-toolkit"
+[project.urls]
+Source = "https://github.com/qiansekai/p2v-toolkit"
+Issues = "https://github.com/qiansekai/p2v-toolkit/issues"
 
 [tool.setuptools]
 packages = ["p2v"]

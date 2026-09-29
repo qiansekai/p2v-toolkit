@@ -1,5 +1,7 @@
 # p2v-toolkit
 
+[![CI](https://github.com/qiansekai/p2v-toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/qiansekai/p2v-toolkit/actions/workflows/ci.yml)
+
 把物理盘上的「系统卷 + ESP」导出为可引导 vmdk 的 Windows 命令行工具。
 **只读、定向、沿用源盘分区 GUID**，全程 CLI + JSON，可被脚本与 agent 驱动。
 
@@ -37,7 +39,7 @@ DiskGenius 一类工具能完成克隆，但会在克隆时**重建分区 GUID**
 ## 安装
 
 ```powershell
-git clone <repo-url> p2v-toolkit
+git clone https://github.com/qiansekai/p2v-toolkit.git
 cd p2v-toolkit
 
 # 方式一：直接跑，不安装
