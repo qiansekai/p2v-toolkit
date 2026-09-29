@@ -1,0 +1,5 @@
+# 统一换行符，避免 Windows 检出把整仓标记为已修改
+* text=auto eol=lf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
