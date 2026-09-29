@@ -59,6 +59,14 @@ def verify_vmdk(path: str, source_disk: int | None = None,
         result["flags"] = reader.flags
         checks.append({"name": "vmdk_header", "ok": True,
                        "detail": "monolithicSparse, capacity=%d sectors" % reader.capacity_sectors})
+        # 半成品（检查点过的中间态）必须被认出来：它结构合法，但不能当产物用
+        checks.append({
+            "name": "vmdk_completed",
+            "ok": not reader.unclean,
+            "detail": ("uncleanShutdown=1：这是检查点过的半成品，尚未 finalize；"
+                       "用 export --resume 继续，或删除后重跑"
+                       if reader.unclean else "uncleanShutdown=0（已 finalize）"),
+        })
 
         try:
             gpt = parse_gpt(reader)

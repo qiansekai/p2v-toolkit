@@ -18,6 +18,7 @@
 | 运行时依赖 | 仅 Python 标准库（3.9+）+ 系统自带 PowerShell |
 | 许可证 | GPL-3.0-only（见 `LICENSE`） |
 | 状态 | 0.1.0 Beta；导出的 vmdk 仍需在 PE 里做两步人工收尾 |
+| 续传 | `export --resume`：中断后从检查点继续，强校验计划指纹 / 源身份 / 快照身份 |
 
 ## 它解决什么问题
 
@@ -58,7 +59,8 @@ p2v --help
   （没有 write / flush / set-length），调用方即使想写也无接口可用
 - **不安装内核驱动**，不修改宿主机分区表 / BCD / VSS 配置
 - `plan` 纯只读、零副作用；`export` 默认 dry-run，**必须 `--apply` 才落盘**
-- 目标文件已存在一律拒绝
+- 目标文件已存在一律拒绝；`--resume` 是唯一例外，它会逐项校验计划指纹、源盘身份与
+  快照身份，任一不符直接报错（混合两个时刻的数据比重新导出更糟）
 - 工具进程本身永远不碰宿主机状态；需要「整盘设为只读」时由
   `scripts/p2v-from-usb.ps1` 用 `Set-Disk -IsReadOnly` 完成（partmgr 层，不写源盘扇区）
 
@@ -84,6 +86,34 @@ python -m p2v verify --vmdk 'H:\sys-p2v.vmdk' --source-disk 3
 退出码：`0` 成功 / `2` 校验失败 / `1` 错误。
 
 读写块大小可调：`--chunk-mib N`（1..256，默认 4）。
+
+### 中断续传
+
+长任务（拆机盘动辄数小时）中断后不必从头再来：
+
+```powershell
+# 第一次跑到一半中断（断电 / 拔盘 / Ctrl+C 都可以）
+python -m p2v export --disk 5 --take "ESP,MSR,part:3" --out 'H:\sys.vmdk' --apply --source-mode physical
+
+# 接着跑：从检查点继续
+python -m p2v export --disk 5 --take "ESP,MSR,part:3" --out 'H:\sys.vmdk' --apply --source-mode physical --resume
+```
+
+导出过程每 `--checkpoint-mib N`（1..8192，默认 256）字节落一次检查点：脏 grain table 与
+GD/RGD 增量写盘，header 标成 `uncleanShutdown=1`，进度水位、计划指纹与源身份记在同名的
+`<out>.p2v-resume.json` 里（原子替换）。成功收尾时检查点会被清掉。
+
+**四条前提，任一不成立都直接拒绝续传（不会静默降级）：**
+
+1. 计划未变 —— `--take` / 容量 / 分区 GUID 一致（比指纹，不比"看起来差不多"）
+2. 源未变 —— 盘序列号 / UniqueId / 容量一致
+3. 源盘只读 —— 物理源必须整盘只读（`Set-Disk -Number N -IsReadOnly $true`），
+   否则中断期间的任意写入会让前后两段来自不同时刻
+4. 快照未变 —— 快照源必须仍是同一个 `Shadow Copy ID`。注意
+   `HarddiskVolumeShadowCopyN` 的**序号会被系统复用**，只看序号会接到另一个快照上
+
+崩溃后最多重做一份检查点的数据（默认 256 MiB）。半成品能被 `verify` 认出来：
+它会报 `vmdk_completed` 失败并说明这是未 finalize 的中间态。
 
 ### 导出后必须人工收尾（不可跳过）
 
@@ -121,6 +151,11 @@ mountvol /E     # 收尾恢复自动挂载
 - 源盘不是本机系统盘时（拆机盘 / 外接盘），`--source-mode auto` 会自动跳过 VSS 直读物理盘
 - 只负责拷贝：**不重建引导引用、不清理后装驱动、不做驱动注入**
 - 目标盘容量与源盘一致，未选中的分区保留为未分配空间（thin vmdk 不占空间）
+- **续传未在真盘验证**：逻辑由 13 项内存替身回归覆盖（含"每个检查点边界各中断一次、
+  续传产物与一次性导出逐字节相同"），但 USB 盒拔插换号、中断期间被系统自动挂载写入
+  这两类真实场景尚未实测
+- 续传要求物理源盘处于只读状态；离线拆机盘请先执行
+  `Set-Disk -Number N -IsReadOnly $true`（`scripts/p2v-from-usb.ps1` 已经会做）
 - `scripts/expand-system-in-pe.cmd` **未实机验证**：PE 内做系统分区扩容，使用前请自行确认
 - VSS 是卷级技术，物理设备层不存在整盘快照；本工具按「ESP 直读 + 系统卷走快照」组合
 - 吞吐实测（早期版本，128 GB 系统卷）：读 128 GB / 写 91 GB / 343 s / 382 MB/s；
@@ -132,9 +167,11 @@ mountvol /E     # 收尾恢复自动挂载
 python -m unittest discover -s tests -t .
 ```
 
-25 项单测，**不需要真实磁盘、不需要管理员权限**：设备层被内存替身替换，
-因此 GPT / vmdk / export / verify 的核心逻辑可以在任何机器上回归。
+39 项单测，**不需要真实磁盘、不需要管理员权限**：设备层被内存替身替换，
+因此 GPT / vmdk / export / verify / 续传的核心逻辑可以在任何机器上回归。
 `tests/test_gpt.py` 与 `tests/test_vmdk.py` 跨平台，其余需要 Windows。
+其中 `tests/test_resume.py` 的主回归是「在每一个检查点边界各中断一次，续传产物与
+一次性导出逐字节相同」。
 
 ## 目录
 
@@ -145,7 +182,8 @@ p2v/
   vmdk.py      sparse vmdk 读写（monolithicSparse）
   vss.py       卷影副本枚举与只读打开（本版本不创建快照）
   plan.py      导出计划（纯只读）
-  export.py    按计划导出（默认 dry-run）
+  export.py    按计划导出（默认 dry-run，支持 --resume 续传）
+  resume.py    续传检查点（水位 / 源身份 / 原子落盘）
   verify.py    产物自检
   __main__.py  CLI 入口
 tests/         单测（标准库 unittest）

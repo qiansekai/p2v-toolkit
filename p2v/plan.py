@@ -6,6 +6,7 @@ plan 阶段**纯只读**，不创建任何文件；执行阶段（export）才�
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -39,6 +40,8 @@ class Segment:
     part_guid: str = ""
     name: str = ""
     attributes: int = 0
+    # 源的身份锚点：快照源记 WMI Shadow Copy ID + 创建时间（序号会被复用，不可信）
+    source_identity: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -54,6 +57,26 @@ class Plan:
     notes: list = field(default_factory=list)
     disk_signature: int = 0
     pmbr_end_lba: int | None = None
+    source_identity: dict = field(default_factory=dict)
+
+    def fingerprint(self) -> str:
+        """计划指纹：任何会改变产物字节或 grain 分配顺序的输入都必须改变它。
+
+        续传靠它拒绝"计划变了还想接着写"。只比容量是不够的——分配顺序取决于
+        segments 的顺序与偏移，--take 换一下顺序，grain 落点就整体错位。
+        盘号不进指纹：USB 盒重新插拔会换号，源身份由 source_identity 单独负责。
+        """
+        digest = hashlib.sha256()
+        digest.update(b"p2v-plan-v1\n")
+        for value in (self.source_capacity, self.target_capacity,
+                      self.disk_signature, self.pmbr_end_lba or 0):
+            digest.update(("%d\n" % value).encode("utf-8"))
+        digest.update(("%s\n" % self.target_disk_guid).encode("utf-8"))
+        for seg in self.segments:
+            digest.update(("%s|%d|%d|%s|%d|%s|%d\n" % (
+                seg.role, seg.dest_offset, seg.size, seg.source_kind,
+                seg.source_offset, seg.part_guid, seg.attributes)).encode("utf-8"))
+        return digest.hexdigest()
 
     def as_dict(self) -> dict:
         return {
@@ -68,6 +91,7 @@ class Plan:
             "target_disk_guid": self.target_disk_guid,
             "disk_signature": "0x%08x" % self.disk_signature,
             "pmbr_end_lba": self.pmbr_end_lba,
+            "source_identity": self.source_identity,
             "segments": [asdict(s) for s in self.segments],
             "notes": self.notes,
         }
@@ -87,6 +111,33 @@ def _ps_json(script: str):
         raise PlanError("powershell failed: %s" % (proc.stderr or "").strip()[:300])
     text = (proc.stdout or "").strip()
     return json.loads(text) if text else None
+
+
+def disk_identity(disk: int) -> dict:
+    """只读查询物理盘身份（序列号 / UniqueId / 容量 / 只读状态）。
+
+    序列号与 UniqueId 是续传时"还是不是同一块盘"的判据；盘号不是（USB 盒重新
+    插拔经常换号）。查询失败返回空 dict，由调用方决定是拒绝还是降级。
+    """
+    script = (
+        "Get-Disk -Number %d | Select-Object Number,SerialNumber,UniqueId,Size,"
+        "BusType,IsReadOnly,FriendlyName | ConvertTo-Json -Compress" % int(disk)
+    )
+    try:
+        data = _ps_json(script)
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {
+        "disk": int(data.get("Number", disk)),
+        "serial_number": str(data.get("SerialNumber") or "").strip(),
+        "unique_id": str(data.get("UniqueId") or "").strip(),
+        "size": int(data.get("Size") or 0),
+        "bus_type": str(data.get("BusType") or "").strip(),
+        "is_read_only": bool(data.get("IsReadOnly")),
+        "model": str(data.get("FriendlyName") or "").strip(),
+    }
 
 
 def _volume_letter(letter: str) -> str:
@@ -117,8 +168,32 @@ def partition_for_volume(letter: str) -> dict:
     }
 
 
-def latest_shadow_index_for_volume(letter: str) -> int | None:
-    """取该卷最新的可用卷影副本序号（只读枚举，不创建）。"""
+def shadow_identity(shadow_index: int) -> dict:
+    """按序号查卷影副本的**当前**身份（续传时确认"还是当初那个快照"）。
+
+    序号会被系统复用，所以身份判据是 WMI 的 Shadow Copy ID（GUID）与创建时间。
+    序号对应的快照已消失时返回空 dict。
+    """
+    from .vss import list_shadows
+
+    for item in list_shadows():
+        if item.get("shadow_index") == int(shadow_index):
+            return {
+                "shadow_index": int(item["shadow_index"]),
+                "id": str(item.get("id") or "").strip().upper(),
+                "install_date": str(item.get("install_date") or "").strip(),
+                "volume": str(item.get("volume") or "").strip(),
+            }
+    return {}
+
+
+def latest_shadow_for_volume(letter: str) -> dict | None:
+    """取该卷最新的可用卷影副本，**连身份一起返回**（只读枚举，不创建）。
+
+    只返回序号是不够的：HarddiskVolumeShadowCopyN 会被系统复用，第二天重新
+    plan 时同一个序号可能已经是另一个快照。所以把 WMI 的 Shadow Copy ID
+    （GUID）与创建时间一并带出来，供续传时逐项比对。
+    """
     from .vss import list_shadows  # 局部导入避免环依赖
 
     lt = _volume_letter(letter)
@@ -135,7 +210,19 @@ def latest_shadow_index_for_volume(letter: str) -> int | None:
         if same:
             shadows = same
     shadows.sort(key=lambda s: str(s.get("install_date") or ""))
-    return shadows[-1]["shadow_index"]
+    best = shadows[-1]
+    return {
+        "shadow_index": int(best["shadow_index"]),
+        "id": str(best.get("id") or "").strip().upper(),
+        "install_date": str(best.get("install_date") or "").strip(),
+        "volume": str(best.get("volume") or "").strip(),
+    }
+
+
+def latest_shadow_index_for_volume(letter: str) -> int | None:
+    """取该卷最新的可用卷影副本序号（只读枚举，不创建）。"""
+    info = latest_shadow_for_volume(letter)
+    return info["shadow_index"] if info else None
 
 
 # ---------------------------------------------------------------------------
@@ -250,6 +337,7 @@ def build_plan(disk: int, take: list, out_path: str, sector_size: int | None = N
         target_disk_guid=str(target_disk_guid),
         disk_signature=disk_signature,
         pmbr_end_lba=pmbr_end_lba,
+        source_identity=disk_identity(disk),
     )
 
     plan.segments.append(Segment("mbr", 0, sector_size, "generated"))
@@ -282,9 +370,10 @@ def build_plan(disk: int, take: list, out_path: str, sector_size: int | None = N
         source_kind = "physical"
         shadow_index = None
         source_offset = p.offset
+        seg_identity: dict = {}
         if p.type_guid == TYPE_BASIC and use_shadow:
             # 系统/数据卷：优先用 VSS 快照保证一致性
-            idx = None
+            shadow_info = None
             try:
                 info = _ps_json(
                     "Get-Partition -DiskNumber %d -PartitionNumber %d | "
@@ -292,16 +381,17 @@ def build_plan(disk: int, take: list, out_path: str, sector_size: int | None = N
                     % (disk, p.index)
                 )
                 if info:
-                    idx = latest_shadow_index_for_volume(str(info))
+                    shadow_info = latest_shadow_for_volume(str(info))
             except Exception:
-                idx = None
-            if idx is not None:
+                shadow_info = None
+            if shadow_info is not None:
                 source_kind = "shadow"
-                shadow_index = idx
+                shadow_index = shadow_info["shadow_index"]
                 source_offset = 0
+                seg_identity = shadow_info
                 plan.notes.append(
                     "partition #%d (%s) 将从卷影副本 %d 读取以保证一致性"
-                    % (p.index, p.name or p.type_name, idx))
+                    % (p.index, p.name or p.type_name, shadow_index))
             elif source_mode == "shadow":
                 raise PlanError(
                     "source-mode=shadow 但 partition #%d 没有可用卷影副本" % p.index)
@@ -324,6 +414,7 @@ def build_plan(disk: int, take: list, out_path: str, sector_size: int | None = N
             part_guid=str(p.part_guid),
             name=p.name,
             attributes=p.attributes,
+            source_identity=seg_identity,
         ))
 
     plan.notes.append("目标盘容量与源盘一致；未选中的分区保留为未分配空间（thin 不占空间）")

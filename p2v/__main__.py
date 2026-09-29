@@ -5,7 +5,7 @@
 ------
 probe   只读枚举磁盘布局（GPT 解析 + CRC 自检）
 plan    生成导出计划（纯只读，不创建任何文件）
-export  按计划导出（默认 dry-run，需 --apply 才落盘）
+export  按计划导出（默认 dry-run，需 --apply 才落盘；中断后 --resume 续传）
 verify  校验产物（自包含解析 vmdk，可选与源盘 / 卷影副本比对）
 
 约定：支持 --json；退出码 0=成功 / 2=校验失败 / 1=错误。
@@ -19,9 +19,11 @@ import sys
 import time
 
 from .gpt import GptError, parse_gpt
-from .export import (DEFAULT_CHUNK_MIB, MAX_CHUNK_MIB, MIN_CHUNK_MIB,
-                     run_export)
+from .export import (DEFAULT_CHECKPOINT_MIB, DEFAULT_CHUNK_MIB,
+                     MAX_CHECKPOINT_MIB, MAX_CHUNK_MIB, MIN_CHECKPOINT_MIB,
+                     MIN_CHUNK_MIB, run_export)
 from .plan import PlanError, build_plan
+from .resume import ResumeError
 from .verify import verify_vmdk
 from .safeio import DeviceError, open_physical_drive
 
@@ -113,14 +115,16 @@ def _cmd_export(args: argparse.Namespace) -> int:
         plan = build_plan(args.disk, args.take, args.out, args.sector_size,
                           source_mode=args.source_mode)
         result = run_export(plan, apply=args.apply, chunk_mib=args.chunk_mib,
-                            progress=progress)
-    except (DeviceError, GptError, PlanError) as exc:
+                            progress=progress, resume=args.resume,
+                            checkpoint_mib=args.checkpoint_mib)
+    except (DeviceError, GptError, PlanError, ResumeError) as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
         return 1
     except Exception as exc:                          # 写盘中途的 IO 错误等
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
         if args.apply:
-            print("hint: %s 可能是不完整产物（未 finalize，无 GD/GT），删除后重跑即可"
+            print("hint: %s 是未完成的半成品（检查点仍在）；修好原因后加 --resume 继续，"
+                  "或连同它与同名 <out>.p2v-resume.json 一起删除后重跑"
                   % args.out, file=sys.stderr)
         return 1
 
@@ -194,6 +198,12 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--chunk-mib", type=int, default=None,
                    help="读写块大小（MiB，%d..%d，默认 %d）；调大可减少 Python 层循环开销"
                         % (MIN_CHUNK_MIB, MAX_CHUNK_MIB, DEFAULT_CHUNK_MIB))
+    e.add_argument("--resume", action="store_true",
+                   help="续用已存在的半成品（需要同目录的 <out>.p2v-resume.json 检查点；"
+                        "会校验计划指纹、源身份与快照身份，不一致直接拒绝）")
+    e.add_argument("--checkpoint-mib", type=int, default=None,
+                   help="每提交这么多数据落一次检查点（%d..%d，默认 %d）；崩溃后最多重做这一份"
+                        % (MIN_CHECKPOINT_MIB, MAX_CHECKPOINT_MIB, DEFAULT_CHECKPOINT_MIB))
     e.add_argument("--json", action="store_true")
     e.set_defaults(func=_cmd_export)
 

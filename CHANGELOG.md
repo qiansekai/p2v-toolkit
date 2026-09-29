@@ -2,6 +2,37 @@
 
 本文件记录 p2v-toolkit 的可见变更。格式参考 Keep a Changelog，版本号遵循语义化版本。
 
+## [Unreleased]
+
+### 功能
+
+- `export --resume`：中断后从检查点续传。导出时每 `--checkpoint-mib`（默认 256 MiB）
+  落一次检查点 —— 脏 grain table 增量写盘 + GD/RGD 全量写 + header 置
+  `uncleanShutdown=1`，水位记在同名 `.p2v-resume.json`（原子替换）。恢复时按水位回退
+  分配器，清掉水位之后的分配并重写，最终产物与一次性导出逐字节相同
+- `--checkpoint-mib N`（1..8192）：检查点间隔
+- `verify` 新增 `vmdk_completed` 断言：把未 finalize 的半成品认出来，
+  而不是让它看起来像正常产物
+
+### 安全
+
+- 续传的四条强校验，任一不符都直接拒绝、不静默降级：计划指纹、源盘身份
+  （序列号 / UniqueId / 容量）、快照身份（`Shadow Copy ID` + 创建时间，**不认会被复用的
+  `HarddiskVolumeShadowCopyN` 序号**）、物理源盘必须整盘只读
+- 快照在两次运行之间被回收或换号时拒绝续传：前 30% 来自快照 A、后 70% 来自物理盘，
+  这种"看起来成功"的撕裂镜像比重新导出一遍糟糕得多
+
+### 修复
+
+- 初始检查点漏记分配器状态（`next_free_sector` / `allocated_grains` 记成 0），
+  会让续传回退时把 GPT 元数据所在的 grain 一起清掉
+
+### 测试
+
+- 新增 `tests/test_resume.py`（14 项）：每个检查点边界各中断一次后逐字节比对、
+  变间隔续传、快照被拉回原始序号，以及六条拒绝路径（缺检查点 / 计划变化 / 只读丢失 /
+  换盘 / 快照消失 / 产物已完成）+ 半成品被 verify 认出；合计 39 项
+
 ## [0.1.0] - 2026-09-29
 
 首个公开版本。

@@ -8,7 +8,7 @@ agent 友好的 P2V 工具链：把物理盘上的「系统卷 + ESP」做成可
 - 替代 DiskGenius 的**技术能力**，不是替代它的 GUI。核心差异：
   1. **定向只取**（ESP + 指定系统卷），**不复制数据盘**（源盘 932GB / 数据盘 588GB 被跳过）
   2. **沿用原分区 GUID 与偏移**，避免 `MountedDevices` 失配导致的 C: -> V: 盘符错乱
-  3. 全程 CLI + JSON，可被 agent 驱动（断点续传**尚未实现**，别照抄旧说法）
+  3. 全程 CLI + JSON，可被 agent 驱动（`export --resume` 支持中断续传，见「外部契约」）
 
 ## 安全红线（最高优先级，改代码前必读）
 
@@ -29,7 +29,8 @@ p2v/
   vmdk.py      sparse vmdk 读写
   vss.py       卷影副本枚举与只读打开（工具自身不创建快照）
   plan.py      导出计划（纯只读）
-  export.py    按计划导出（默认 dry-run）
+  export.py    按计划导出（默认 dry-run，支持 --resume）
+  resume.py    续传检查点（水位 / 源身份 / 原子落盘）
   verify.py    产物自检
   __main__.py  CLI 入口：probe / plan / export / verify
 tests/         单测（标准库 unittest，无需真盘）
@@ -41,7 +42,7 @@ pyproject.toml / CHANGELOG.md / LICENSE / .github/workflows/ci.yml
 
 ## 开发约定
 
-- 测试：`python -m unittest discover -s tests -t .`（25 项，无需真盘、无需管理员权限 —— 设备层被内存替身替换）
+- 测试：`python -m unittest discover -s tests -t .`（39 项，无需真盘、无需管理员权限 —— 设备层被内存替身替换）
 - **改 `export` / `vmdk` / `gpt` 必须跑测试**：分块循环曾因变量复用出现「首轮后必崩」，
   而当时没有任何自动化回归，只能靠真盘手工跑
 - 新增文件保留 `# SPDX-License-Identifier: GPL-3.0-only` 头
@@ -59,6 +60,11 @@ pyproject.toml / CHANGELOG.md / LICENSE / .github/workflows/ci.yml
 - **`vol:C:` 只对本机在线的卷有效**：跨机拆盘必须用 `part:N`（跨盘会被直接拒绝）；
   盘符限定为单个字母（会拼进 PowerShell，禁止放宽）
 - **`verify --source-shadow` 必须同时给 `--source-disk`**：卷影副本是卷级的，不含分区表
+- **续传（`export --resume`）的四条强校验不许放宽**：计划指纹、源盘身份、快照身份
+  （`Shadow Copy ID`，**不是会被复用的 `HarddiskVolumeShadowCopyN` 序号**）、物理源盘只读。
+  任何一条不符都必须报错而不是降级 —— "看起来成功"的撕裂镜像比重新导出更糟
+- **分配位置由"写入顺序"决定，而写入顺序由 plan 的段顺序决定**（`--take` 可以是非递增的）。
+  所以回退判据只能用数据位置（`next_free_sector`），不能用 grain 下标
 
 ## 已验证的关键事实（2026-09-28）
 
@@ -73,3 +79,5 @@ pyproject.toml / CHANGELOG.md / LICENSE / .github/workflows/ci.yml
 
 - `scripts/expand-system-in-pe.cmd`：PE 内系统分区扩容，从未在真实 PE 里跑过
 - 4Kn 盘、>2 TiB 源盘、多系统卷组合：只在 512B / 单系统卷场景实测
+- 续传：只有内存替身回归（含逐字节等价），USB 盒拔插换号、中断期间被系统挂载写盘
+  这两类真实场景未实测

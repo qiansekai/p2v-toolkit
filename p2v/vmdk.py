@@ -11,6 +11,15 @@
 
 写入策略：源数据顺序读，非零 grain 顺序追加到文件尾，GT/GD 在内存里累积，
 结束时回写 header + RGD + GD + GT。全零 grain 不分配 -> thin。
+
+续传（resume=True）
+------------------
+分配位置由"第 k 个被分配的非零 grain"唯一决定（overhead + k*GRAIN_SECTORS），
+所以中断后重跑会落到完全相同的扇区，不会错位。但 GT/GD 原本只在 finalize 时
+回写，中途退出等于没有任何状态 —— 因此引入 checkpoint()：把脏 GT 与 GD/RGD
+增量落盘，并把 header 的 uncleanShutdown 置 1 标记"未完成"。
+**恢复时 header / GD / GT 是权威事实，水位由 sidecar 提供**（GTE 表分不清
+"全零"与"还没读到"）。
 """
 
 from __future__ import annotations
@@ -47,10 +56,12 @@ class SparseVmdkWriter:
     """
 
     def __init__(self, path: str, capacity_bytes: int, adapter: str = "lsilogic",
-                 geometry_heads: int = 255, geometry_sectors: int = 63) -> None:
+                 geometry_heads: int = 255, geometry_sectors: int = 63,
+                 resume: bool = False) -> None:
         if capacity_bytes % SECTOR:
             raise VmdkError("capacity must be a multiple of %d" % SECTOR)
         self.path = path
+        self.resume = bool(resume)
         self.capacity_sectors = capacity_bytes // SECTOR
         self.adapter = adapter
         self.geometry_heads = geometry_heads
@@ -88,14 +99,95 @@ class SparseVmdkWriter:
         self.allocated_grains = 0
         self._f = None
         self._finalized = False
+        self._dirty_gts: set = set()
+        self.unclean = False
 
     # -- lifecycle --------------------------------------------------------
     def __enter__(self) -> "SparseVmdkWriter":
+        if self.resume:
+            return self._open_existing()
         if os.path.exists(self.path):
             raise VmdkError("refusing to overwrite existing file: %s" % self.path)
         self._f = open(self.path, "w+b")
         self._reserve_metadata()
         return self
+
+    def _open_existing(self) -> "SparseVmdkWriter":
+        """打开半成品并恢复分配器状态；任何不一致都直接拒绝，不做猜测。"""
+        if not os.path.exists(self.path):
+            raise VmdkError("resume 需要已存在的半成品，但目标不存在：%s" % self.path)
+        self._f = open(self.path, "r+b")
+        try:
+            self._load_existing()
+        except BaseException:
+            # 打开失败不要把句柄留在外面（Windows 上会一直占住文件）
+            self._f.close()
+            self._f = None
+            raise
+        return self
+
+    def _load_existing(self) -> None:
+        raw = self._f.read(512)
+        if len(raw) < 512:
+            raise VmdkError("目标文件小于一个扇区，不是可续传的半成品：%s" % self.path)
+        (magic, version, _flags, capacity, grain, _desc_off, _desc_size,
+         num_gtes, rgd_off, gd_off, overhead) = struct.unpack_from("<IIIQQQQIQQQ", raw, 0)
+        if magic != VMDK_MAGIC:
+            raise VmdkError(
+                "目标文件没有 vmdk header，无法续传（上一次导出在第一个检查点之前就"
+                "中断了），请删除后重跑：%s" % self.path)
+        if version != VMDK_VERSION:
+            raise VmdkError("unsupported vmdk version %d" % version)
+        if grain != GRAIN_SECTORS or num_gtes != NUM_GTES_PER_GT:
+            raise VmdkError("半成品几何参数不受支持：grain=%d numGTEsPerGT=%d"
+                            % (grain, num_gtes))
+        if capacity != self.capacity_sectors:
+            raise VmdkError("半成品虚拟容量 %d 扇区与本次计划 %d 扇区不一致"
+                            % (capacity, self.capacity_sectors))
+        if (overhead != self.overhead or gd_off != self.gd_offset
+                or rgd_off != self.rgd_offset):
+            raise VmdkError("半成品元数据布局与本次计划不一致：overhead %d/%d gd %d/%d"
+                            % (overhead, self.overhead, gd_off, self.gd_offset))
+        self.unclean = bool(raw[72])
+
+        self._f.seek(gd_off * SECTOR)
+        gd_raw = self._f.read(self.num_gts * 4)
+        if len(gd_raw) < self.num_gts * 4:
+            raise VmdkError("半成品的 grain directory 不完整")
+        gd = list(struct.unpack("<%dI" % self.num_gts, gd_raw))
+        for i, gt_sector in enumerate(gd):
+            expected = self.gt_offset + i * GT_SECTORS
+            if gt_sector != expected:
+                raise VmdkError("GD[%d]=%d 与预期 %d 不符，目标文件不是本工具写的半成品"
+                                % (i, gt_sector, expected))
+
+        gts = []
+        allocated = 0
+        highest_sector = 0
+        for i in range(self.num_gts):
+            self._f.seek((self.gt_offset + i * GT_SECTORS) * SECTOR)
+            blob = self._f.read(NUM_GTES_PER_GT * 4)
+            if len(blob) < NUM_GTES_PER_GT * 4:
+                raise VmdkError("grain table #%d 不完整" % i)
+            row = list(struct.unpack("<%dI" % NUM_GTES_PER_GT, blob))
+            gts.append(row)
+            for value in row:
+                if value:
+                    allocated += 1
+                    if value > highest_sector:
+                        highest_sector = value
+        if allocated:
+            expected_free = highest_sector + GRAIN_SECTORS
+            if expected_free != self.data_offset + allocated * GRAIN_SECTORS:
+                raise VmdkError(
+                    "半成品分配不连续（已分配 %d 个 grain，最高位置在 %d 扇区）；"
+                    "文件可能被外部改动过，拒绝续传" % (allocated, highest_sector))
+            self.next_free_sector = expected_free
+        else:
+            self.next_free_sector = self.data_offset
+        self.gd = gd
+        self.gts = gts
+        self.allocated_grains = allocated
 
     def __exit__(self, exc_type, exc, tb) -> bool:
         # 有异常时**不** finalize：半成品不该看起来像一个正常的 vmdk
@@ -129,6 +221,7 @@ class SparseVmdkWriter:
         self.gts[gt_i][gte_i] = sector
         if self.gd[gt_i] == 0:
             self.gd[gt_i] = self.gt_offset + gt_i * GT_SECTORS
+        self._dirty_gts.add(gt_i)
         self.allocated_grains += 1
 
     def write_at(self, offset: int, data: bytes) -> None:
@@ -162,6 +255,49 @@ class SparseVmdkWriter:
                 elif any(current):
                     self.write_grain(grain_index, bytes(current))
             pos += take
+
+    # -- 检查点 / 续传 -----------------------------------------------------
+    def checkpoint(self) -> None:
+        """把元数据增量落盘，并把 header 标记为「未完成」，供中断后续传。
+
+        只写**脏**的 grain table：1 TiB 计划全量落一次是 128 MiB，按 256 MiB
+        数据落一次就是 50% 写放大。GD / RGD 每张只有 4 字节且必须整区一致，
+        所以按全量写（1 TiB 计划两张各 128 KiB，可忽略）。
+        """
+        if self._f is None:
+            raise VmdkError("writer is not open")
+        self._write_gd_rgd()
+        for index in sorted(self._dirty_gts):
+            self._write_gt(index)
+        self._write_header(unclean=True)
+        self._flush()
+        self._dirty_gts.clear()
+
+    def rewind(self, next_free_sector: int) -> int:
+        """把分配器回退到检查点水位，丢弃水位之后的分配，返回丢弃的 grain 数。
+
+        判据是**数据位置**而不是 grain 下标：grain 被分配的先后等于"写入顺序"，
+        而写入顺序由 plan 的段顺序决定（--take 完全可以写成 "vol:C:,ESP" 这种
+        非递增顺序），所以 grain_index 与分配先后没有对应关系。凡是指向
+        >= 水位的 GTE 都是检查点之后才产生的分配，必须清掉 —— 否则它们会一直
+        指向陈旧数据（该 grain 不会再被重新分配时就永远错下去）。
+        """
+        limit = int(next_free_sector)
+        dropped = 0
+        for index, row in enumerate(self.gts):
+            if not any(row):                     # 空行用 C 级 any 快速跳过
+                continue
+            changed = False
+            for position, sector in enumerate(row):
+                if sector and sector >= limit:
+                    row[position] = 0
+                    dropped += 1
+                    changed = True
+            if changed:
+                self._dirty_gts.add(index)
+        self.next_free_sector = limit
+        self.allocated_grains = max(0, self.allocated_grains - dropped)
+        return dropped
 
     # -- finalize ---------------------------------------------------------
     def _descriptor_text(self) -> bytes:
@@ -197,12 +333,21 @@ class SparseVmdkWriter:
         self._f.seek(1 * SECTOR)
         self._f.write(desc + b"\x00" * (DESCRIPTOR_SECTORS * SECTOR - len(desc)))
 
-        def _pack32(vals: list) -> bytes:
-            raw = struct.pack("<%dI" % len(vals), *vals)
-            pad = self.entry_table_sectors * SECTOR - len(raw)
-            return raw + b"\x00" * pad
+        self._write_gd_rgd()
+        for i in range(self.num_gts):
+            self._write_gt(i)
+        self._write_header(unclean=False)
+        self._flush()
+        self._dirty_gts.clear()
+        self._finalized = True
 
-        # 主 GD -> 主 GT 区；RGD -> 冗余 GT 区（两台 GT 内容相同，互为备份）
+    def _pack32(self, vals: list) -> bytes:
+        raw = struct.pack("<%dI" % len(vals), *vals)
+        pad = self.entry_table_sectors * SECTOR - len(raw)
+        return raw + b"\x00" * pad
+
+    def _write_gd_rgd(self) -> None:
+        # 主 GD -> 主 GT 区；RGD -> 冗余 GT 区（两区内容相同，互为备份）
         # 注意：GD / RGD 这一层**不稀疏** —— 每一项都必须指向对应的 GT 位置
         # （稀疏性只体现在 GTE 层：GTE == 0 表示该 grain 未分配）。
         # qemu-img 的成品同样如此（q1g.vmdk 的 8 个 GD 项全非零）。
@@ -211,17 +356,18 @@ class SparseVmdkWriter:
         gd_main = [self.gt_offset + i * GT_SECTORS for i in range(self.num_gts)]
         rgd_vals = [self.redundant_gt_offset + i * GT_SECTORS for i in range(self.num_gts)]
         self._f.seek(self.gd_offset * SECTOR)
-        self._f.write(_pack32(gd_main))
+        self._f.write(self._pack32(gd_main))
         self._f.seek(self.rgd_offset * SECTOR)
-        self._f.write(_pack32(rgd_vals))
+        self._f.write(self._pack32(rgd_vals))
 
-        for i, gt in enumerate(self.gts):
-            blob = struct.pack("<%dI" % NUM_GTES_PER_GT, *gt)
-            self._f.seek((self.gt_offset + i * GT_SECTORS) * SECTOR)
-            self._f.write(blob)
-            self._f.seek((self.redundant_gt_offset + i * GT_SECTORS) * SECTOR)
-            self._f.write(blob)
+    def _write_gt(self, index: int) -> None:
+        blob = struct.pack("<%dI" % NUM_GTES_PER_GT, *self.gts[index])
+        self._f.seek((self.gt_offset + index * GT_SECTORS) * SECTOR)
+        self._f.write(blob)
+        self._f.seek((self.redundant_gt_offset + index * GT_SECTORS) * SECTOR)
+        self._f.write(blob)
 
+    def _write_header(self, unclean: bool) -> None:
         header = bytearray(512)
         struct.pack_into(
             "<IIIQQQQIQQQ", header, 0,
@@ -230,7 +376,7 @@ class SparseVmdkWriter:
             1, DESCRIPTOR_SECTORS, NUM_GTES_PER_GT,
             self.rgd_offset, self.gd_offset, self.overhead,
         )
-        header[72] = 0                     # uncleanShutdown = 0
+        header[72] = 1 if unclean else 0    # uncleanShutdown：半成品必须为 1
         header[73] = ord("\n")
         header[74] = ord(" ")
         header[75] = ord("\r")
@@ -238,10 +384,11 @@ class SparseVmdkWriter:
         struct.pack_into("<H", header, 77, 0)   # compressAlgorithm = none
         self._f.seek(0)
         self._f.write(bytes(header))
+        self.unclean = bool(unclean)
 
+    def _flush(self) -> None:
         self._f.flush()
         os.fsync(self._f.fileno())
-        self._finalized = True
 
     # -- info -------------------------------------------------------------
     def stats(self) -> dict:
@@ -263,7 +410,7 @@ class SparseVmdkReader:
     """
 
     __slots__ = ("path", "sector_size", "capacity_sectors", "grain_sectors",
-                 "num_gtes_per_gt", "flags", "gd_offset", "overhead",
+                 "num_gtes_per_gt", "flags", "gd_offset", "overhead", "unclean",
                  "_f", "_gd", "_gt_cache")
 
     def __init__(self, path: str, sector_size: int = SECTOR) -> None:
@@ -296,6 +443,8 @@ class SparseVmdkReader:
         self.flags = flags
         self.gd_offset = gd_off
         self.overhead = overhead
+        # uncleanShutdown：1 表示这是一份中途检查点过的半成品，还没 finalize
+        self.unclean = bool(header[72])
 
         num_gts = (capacity + grain - 1) // grain
         num_gd_entries = (num_gts + num_gtes - 1) // num_gtes
@@ -319,6 +468,10 @@ class SparseVmdkReader:
             self._gt_cache[gt_i] = struct.unpack("<%dI" % self.num_gtes_per_gt,
                                                  self._f.read(self.num_gtes_per_gt * 4))
         return self._gt_cache[gt_i][gte_i]
+
+    def grain_sector(self, grain_index: int) -> int:
+        """该 grain 的数据区起始扇区；0 表示未分配（thin 空洞）。"""
+        return self._grain_sector(grain_index)
 
     def read_at(self, offset: int, size: int) -> bytes:
         if offset < 0 or size < 0:
