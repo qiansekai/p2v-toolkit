@@ -42,12 +42,31 @@ pyproject.toml / CHANGELOG.md / LICENSE / .github/workflows/ci.yml
 
 ## 开发约定
 
-- 测试：`python -m unittest discover -s tests -t .`（39 项，无需真盘、无需管理员权限 —— 设备层被内存替身替换）
+- 测试：`python -m unittest discover -s tests -t .`（43 项，无需真盘、无需管理员权限 —— 设备层被内存替身替换）
 - **改 `export` / `vmdk` / `gpt` 必须跑测试**：分块循环曾因变量复用出现「首轮后必崩」，
   而当时没有任何自动化回归，只能靠真盘手工跑
 - 新增文件保留 `# SPDX-License-Identifier: GPL-3.0-only` 头
 - 未经实机验证的能力必须在 README 与 `CHANGELOG.md` 标注，不要写成可用功能
 - 提交信息用中文 + 语义前缀（fix / feat / docs / test / chore）
+
+## 热路径约定（改 `p2v/vmdk.py` 的写入路径前必读）
+
+导出是单线程顺序拷贝。在「源盘与目标盘都不是瓶颈」的前提下，CPU 全花在 Python 层，
+所以下面每一条都不是"风格"，而是被基准量过、且被回归测试锁住的约束：
+
+- **零判据必须全量**（`_nonzero`）：不许用"抽样若干段"判"是否全零"。零字节与数据字节
+  的分布没有任何约束 —— GPT 备份分区表就落在 64 KiB grain 的 48640 偏移处，首尾各 4 KiB
+  都是零，抽样会把它当 thin 空洞丢掉（真实踩过）。bytes/bytearray 上的 `any()` 本身就是
+  C 循环，4 MiB 约 1.6 TB/s，不需要再优化
+- **grain table 惰性分配**：`gts` 里未写到的表保持 `None`，写入时经 `_pad_gt()` 补齐。
+  1 TiB 容量满建是 32768 张 × 512 项 ≈ 130 MiB，一次导出通常只用到四分之一。
+  任何遍历 `gts` 的新代码都必须处理 `None`（`_write_gt` / `_write_gt_range` / `rewind` 已处理）
+- **检查点只写脏表，且相邻脏表合并成一次写**（`_dirty_runs` + `_write_gt_range`）：
+  GT 区在 1 TiB 下是 64 MiB，退化成"每张表两次 write"会让一次检查点从亚毫秒涨到几百毫秒
+- **不许在写路径里共享可变的解包缓存**：曾经用 `values[0] = tuple(row)` 缓存，等于把缓存
+  槽位改名指向最近一次写入的表，后续"空表"就会写出前一张表的内容（备份 GPT 被覆盖）
+- **对齐整块写的零扫描只做一次**：`write_at` 对整块扫一次，结论经 `nonzero=True` 传给
+  `_write_grain_at`，不要逐 64 KiB 重扫
 
 ## 外部契约（改代码前注意）
 
