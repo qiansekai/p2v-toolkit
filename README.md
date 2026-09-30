@@ -143,6 +143,41 @@ mountvol /E     # 收尾恢复自动挂载
 顺序跑 probe / plan / export / verify，并可选把源盘整盘设为只读（在 `finally` 里恢复并核对）。
 开关：`-DryRun`（只检查与打印）、`-NoLock`、`-KeepReadOnly`。
 
+## 格式转换（VHDX ↔ VMDK）
+
+本工具**只输出 monolithicSparse vmdk**。要上 Hyper-V（或从 Hyper-V 迁回来）时用 qemu-img
+做块级转换 —— 它是块级拷贝、**不做分区重组**，所以分区 GUID / 磁盘签名 / 保护性 MBR
+都原样保留，不会重演 DiskGenius 那种盘符错乱。
+
+```powershell
+# 本机位置（注意不在 PATH 里）
+$Q = 'D:\Kita-Tools\DevEnv\qemu-img\qemu-img.exe'
+
+# vmdk -> vhdx（迁去 Hyper-V）
+& $Q convert -p -f vmdk -O vhdx -o block_size=32M 'H:\sys-p2v.vmdk' 'H:\sys-p2v.vhdx'
+
+# vhdx -> vmdk（从 Hyper-V 迁回来）
+& $Q convert -p -f vhdx -O vmdk -o subformat=monolithicSparse,adapter_type=lsilogic `
+    'H:\sys-p2v.vhdx' 'H:\sys-back.vmdk'
+```
+
+**中间文件**：`convert` 是流式的（读源写目标，不落 raw 中间盘），但**源文件必须保留**，
+峰值空间约等于「源 + 目标」（示例：91 GB 的 vmdk 转 vhdx，峰值约 180 GB）。
+确认产物可用后再删源。要彻底不产生中间文件只能自研 VHDX writer，但 VHDX 规范
+（BAT / 元数据 / 日志区）比 sparse vmdk 复杂一个量级，不值得为省一份中间文件去写。
+
+**转完不等于能开机**，跨 hypervisor 还有三件事：
+
+1. **磁盘控制器 / 驱动**：VMware 的 SCSI 驱动与 Hyper-V 的合成驱动（`storvsc` / `netvsc`）不同，
+   与 P2V 那两步收尾里的「删除所有后装驱动」是同类问题
+2. **引导代次**：Hyper-V **Gen2 = UEFI**（与本工具的 ESP 产物一致），Gen1 = BIOS/MBR，选错不进引导
+3. **adapterType**：反向转回 vmdk 时 qemu-img 用默认值，需要 `-o adapter_type=lsilogic`
+   才与 VMware 原生一致
+
+工具边界：`vmware-vdiskmanager` 只做 vmdk 内部转换、**不认 vhdx**；Hyper-V 自带的
+`Convert-VHD` **不认 vmdk**；StarWind V2V 可双向但要装内核驱动（撞本项目的安全红线）。
+双向都走 qemu-img。
+
 ## 已知边界
 
 - **只支持 512 字节逻辑扇区**：扇区大小默认向设备查询，探到 4Kn 直接拒绝
