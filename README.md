@@ -178,6 +178,35 @@ $Q = 'D:\Kita-Tools\DevEnv\qemu-img\qemu-img.exe'
 `Convert-VHD` **不认 vmdk**；StarWind V2V 可双向但要装内核驱动（撞本项目的安全红线）。
 双向都走 qemu-img。
 
+## grain 尺寸为什么是 64 KiB
+
+sparse vmdk 的分配粒度叫 **grain**：只有"含非零字节"的 grain 才在文件里占位置，
+所以 grain 大小同时决定两笔互相对冲的成本：
+
+| | 公式 | grain 变大时 |
+|---|---|---|
+| 元数据 | 12 字节 / grain = 12 x 容量 / grain | 变省 |
+| 空洞边界的对齐浪费 | 空洞边界数 x grain / 2 | 变亏 |
+
+1 TiB 容量下元数据总共只有 **128 MiB（0.0122%）** —— 省不出什么；而放大 grain 会让
+"跨在数据边缘"的空洞被整块分配掉，直接胀产物。实测两台真机的真实卷（零占比 25~37%）：
+空洞**不是**少量大块，而是**大量中等块**，因此产物最小的尺寸就落在候选集合的最小值
+**64 KiB**。
+
+这不是偏好，还受格式约束：vmdk 把 grain table 固定为 1 个扇区（512 项 x 4B），所以
+grain 只能是 64 KiB 的整数倍 —— 候选是离散的，不能连续调。64 KiB 同时也是 qemu-img
+的默认值，与 VMware 的 SPARSECHK 兼容性最好。
+
+换源盘（尤其是"近乎全零的脏盘"这种反例）时重算：
+
+```powershell
+# 只读采样，给出该盘产物最小的 grain
+python scripts\grain-fit.py --disk 3
+python scripts\grain-fit.py --disk 0 --partition 1 --json
+```
+
+结论：**本工具不提供 --grain 选项**。加一个能把产物从 1.00x 吹到 1.06x 的旋钮没有意义。
+
 ## 已知边界
 
 - **只支持 512 字节逻辑扇区**：扇区大小默认向设备查询，探到 4Kn 直接拒绝
@@ -195,6 +224,9 @@ $Q = 'D:\Kita-Tools\DevEnv\qemu-img\qemu-img.exe'
 - VSS 是卷级技术，物理设备层不存在整盘快照；本工具按「ESP 直读 + 系统卷走快照」组合
 - 吞吐实测（早期版本，128 GB 系统卷）：读 128 GB / 写 91 GB / 343 s / 382 MB/s；
   裸盘读写可达 1.2-1.4 GB/s，瓶颈在 VSS 快照路径与 Python 单线程循环
+- 写路径热路径已按 CPU 上限打磨（检查点只落脏表 + 相邻合并、GT 惰性分配、整块零扫描只做
+  一次）：4 MiB 块写入约 420 MB/s、8 MiB 块约 468 MB/s（内存替身，`process_time`），
+  检查点开销不再与容量成正比
 
 ## 测试
 
@@ -202,9 +234,10 @@ $Q = 'D:\Kita-Tools\DevEnv\qemu-img\qemu-img.exe'
 python -m unittest discover -s tests -t .
 ```
 
-39 项单测，**不需要真实磁盘、不需要管理员权限**：设备层被内存替身替换，
-因此 GPT / vmdk / export / verify / 续传的核心逻辑可以在任何机器上回归。
-`tests/test_gpt.py` 与 `tests/test_vmdk.py` 跨平台，其余需要 Windows。
+52 项单测，**不需要真实磁盘、不需要管理员权限**：设备层被内存替身替换，
+因此 GPT / vmdk / export / verify / 续传 / grain-fit 的核心逻辑可以在任何机器上回归。
+`tests/test_gpt.py`、`tests/test_vmdk.py`、`tests/test_grain_fit.py` 跨平台，其余需要 Windows。
+性能与 grain 相关的语义回归见 `tests/test_vmdk.py::HotPathTest`（4 项）。
 其中 `tests/test_resume.py` 的主回归是「在每一个检查点边界各中断一次，续传产物与
 一次性导出逐字节相同」。
 
@@ -225,6 +258,7 @@ tests/         单测（标准库 unittest）
 scripts/
   p2v-from-usb.ps1          USB 拆机盘导出包装（安全闸 + 可选整盘只读）
   expand-system-in-pe.cmd   PE 内可选的系统分区扩容（未实机验证）
+  grain-fit.py              只读测源盘空洞分布，回答"该用多大 grain"
 ```
 
 ## 排错

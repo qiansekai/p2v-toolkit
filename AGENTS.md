@@ -37,17 +37,36 @@ tests/         单测（标准库 unittest，无需真盘）
 scripts/
   p2v-from-usb.ps1          USB 拆机盘导出包装（安全闸 + 可选整盘只读 + 顺序跑四步）
   expand-system-in-pe.cmd   PE 内可选的系统分区扩容（未实机验证）
+  grain-fit.py              只读测源盘空洞分布，回答"该用多大 grain"（见「grain 尺寸」）
 pyproject.toml / CHANGELOG.md / LICENSE / .github/workflows/ci.yml
 ```
 
 ## 开发约定
 
-- 测试：`python -m unittest discover -s tests -t .`（43 项，无需真盘、无需管理员权限 —— 设备层被内存替身替换）
+- 测试：`python -m unittest discover -s tests -t .`（52 项，无需真盘、无需管理员权限 —— 设备层被内存替身替换）
 - **改 `export` / `vmdk` / `gpt` 必须跑测试**：分块循环曾因变量复用出现「首轮后必崩」，
   而当时没有任何自动化回归，只能靠真盘手工跑
 - 新增文件保留 `# SPDX-License-Identifier: GPL-3.0-only` 头
 - 未经实机验证的能力必须在 README 与 `CHANGELOG.md` 标注，不要写成可用功能
 - 提交信息用中文 + 语义前缀（fix / feat / docs / test / chore）
+
+## grain 尺寸（不要改成"可调旋钮"）
+
+`GRAIN_SECTORS = 128`（一个 grain = 128 个 512B 扇区 = 64 KiB）不是随手选的默认值，而是**实测下的最优点**，
+且受格式约束限定为离散集合。
+
+- **约束**：vmdk 把 grain table 固定为 1 个扇区（512 项 x 4B），所以 `GRAIN_SECTORS`
+  只能是 128 的整数倍 —— 候选是 64 KiB / 128 KiB / 256 KiB / ...，不能连续调
+- **两笔对冲的成本**：元数据 = 12 字节/grain = 12 x 容量 / grain（grain 越大越省）；
+  空洞边界的对齐浪费 = 空洞边界数 x grain / 2（grain 越大越亏）。
+  1 TiB 容量下元数据总共才 128 MiB（0.0122%），而放大 grain 会直接胀产物
+- **实测（`scripts/grain-fit.py`，两台真机）**：真实卷的空洞不是少量大块，而是大量
+  中等块（零占比 25~37%，却有成百上千个 64 KiB 级零 run）。因此产物最小的尺寸就是
+  候选集合的最小值 64 KiB；放大到 1 MiB 产物胀 0.6%~4%，2048 KiB 胀 1.2%~6.4%
+- **换源盘要重算**：`python scripts/grain-fit.py --disk N`。近乎全零的脏盘是反例
+  （空洞边界少，大 grain 反而更省），届时结论会变；脚本会直接给出该盘的答案
+
+结论：**保持 64 KiB，且不提供 --grain 选项** —— 加了只会给人一个能把产物吹大的开关。
 
 ## 热路径约定（改 `p2v/vmdk.py` 的写入路径前必读）
 
