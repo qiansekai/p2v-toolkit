@@ -30,7 +30,9 @@
 - `scripts/p2v-live-system.ps1` 新增 BCD 判据预检：导出前只读挂载源机 ESP，按
   `\EFI\Microsoft\Boot\BCD` 的大小直接告诉你产物要不要进 PE（36864 需要 / 40960 不需要），
   并可用 `-PreflightBcdboot` 在导出前于源机重写一遍（默认关闭 —— 它改写源机引导配置）；
-  `-SkipBcdCheck` 可跳过。**同时修掉一处误删**：早先修 `Remove-VolumeShadow` 时把
+  `-SkipBcdCheck` 可跳过。**未实机验证**：`-PreflightBcdboot` 的**写路径**没有真跑过
+  （本机 BCD 已是 40960，不会触发；只在 DryRun 与守卫表达式层面验证过 —— 守卫本身用真机
+  试过正例通过与外来盘拒绝），首次使用前请确认目标盘符。**同时修掉一处误删**：早先修 `Remove-VolumeShadow` 时把
   `# 5) 命令拼装` 段的前 5 行一并替换掉了，脚本从那时起无法运行（用 AST 只提函数跑的
   删除路径测试察觉不到；这次靠整体语法检查抓到）。
 - 新增 `p2v vmx` 子命令：从产物 vmdk 生成 VMware Workstation 的 `.vmx`。把 2026-10-01 踩过的

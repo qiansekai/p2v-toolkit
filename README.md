@@ -192,6 +192,9 @@ crash-consistent（移动中）的文件系统。工具本身刻意不创建快�
 盘符与本机完全不同。（`Get-Volume` / `Get-Partition` / `Win32_Volume` 在 ESP 挂上盘符后都看不见它，
 只有 `mountvol /L` 可靠 —— 实测。）
 
+> **未实机验证**：`-PreflightBcdboot` 的**写路径**尚未真跑（本机 BCD 已是 40960，不会触发），
+> 只在 DryRun 与守卫表达式层面验证过；首次使用时请先确认它报出的目标盘符确实是你想改的那个。
+
 > 客户端版 Windows 的 `vssadmin` **没有 create 子命令**（本机实测只有 Delete Shadows /
 > List * / Resize ShadowStorage，`vssadmin create shadow` 直接报 `Invalid command`），
 > `diskshadow` 也常常不存在；可用的创建方式就是 CIM 静态方法
