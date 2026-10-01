@@ -82,13 +82,14 @@ def _readable_length(dev, declared: int) -> int:
 
 
 MANUAL_POST_STEPS = [
-    "产物已导出，但还不能直接开机：本工具只做拷贝，不做引导修复与驱动清理。",
-    "请在 PE 里用 Dism++ 点两下完成收尾（本机已两次独立验证）：",
-    "  1) Dism++ → 引导修复        # 不做会报 0xc000000e（File: \\Windows\\system32\\winload.efi）",
-    "  2) Dism++ → 驱动管理 → 删除所有后装驱动（保留 in-box）",
-    "                              # 不做可能因与原机硬件绑定的驱动在过引导后出问题",
-    "命令行等价物（不喜欢点击时用）： bcdboot C:\\Windows /s <ESP盘符>: /f UEFI",
-    "参考： Notes\\env\\env-vmware-p2v.md（黑屏 / 0xc000000e 排查）",
+    "产物已导出。能否直接开机，取决于源机 ESP 上 \\EFI\\Microsoft\\Boot\\BCD 的大小：",
+    "  36864 = 出厂原始 hive                -> 首次开机报 0xc000000e",
+    "                                        （File: \\Windows\\system32\\winload.efi），需要进 PE 修引导",
+    "  40960 = 已被 bcdboot/Dism++ 重写过    -> 可直接开机（2026-10-01 实测，未进 PE）",
+    "需要修引导时（PE 内）：Dism++ → 引导修复，或 bcdboot C:\\Windows /s <ESP盘符>: /f UEFI",
+    "删除后装驱动是可选的稳定性措施：它与 0xc000000e 无关（失败发生在 winload 阶段，轮不到驱动）",
+    "下一步：python -m p2v vmx --vmdk <产物路径> 生成 VMware 的 .vmx，然后双击启动",
+    "参考： Notes\\env\\env-vmware-p2v.md（黑屏 / 0xc000000e / BCD 判据）",
 ]
 
 

@@ -7,6 +7,7 @@ probe   只读枚举磁盘布局（GPT 解析 + CRC 自检）
 plan    生成导出计划（纯只读，不创建任何文件）
 export  按计划导出（默认 dry-run，需 --apply 才落盘；中断后 --resume 续传）
 verify  校验产物（自包含解析 vmdk，可选与源盘 / 卷影副本比对）
+vmx     从产物 vmdk 生成 VMware 的 .vmx（含 PCIe 根端口与槽位分配）
 
 约定：支持 --json；退出码 0=成功 / 2=校验失败 / 1=错误。
 """
@@ -25,6 +26,10 @@ from .export import (DEFAULT_CHECKPOINT_MIB, DEFAULT_CHUNK_MIB,
 from .plan import PlanError, build_plan
 from .resume import ResumeError
 from .verify import verify_vmdk
+from .vmx import (CONNECTIONS, CONTROLLERS, DEFAULT_BOOT_DELAY_MS,
+                  DEFAULT_CONNECTION, DEFAULT_CONTROLLER, DEFAULT_GUEST_OS,
+                  DEFAULT_HW_VERSION, DEFAULT_MEMSIZE_MB, DEFAULT_NIC,
+                  DEFAULT_VCPUS, VmxError, write_vmx)
 from .safeio import DeviceError, open_physical_drive
 
 
@@ -163,6 +168,42 @@ def _cmd_verify(args: argparse.Namespace) -> int:
     return 0 if result["ok"] else 2
 
 
+def _cmd_vmx(args: argparse.Namespace) -> int:
+    try:
+        result = write_vmx(
+            args.vmdk,
+            out_path=args.out,
+            name=args.name,
+            force=args.force,
+            firmware=args.firmware,
+            guest_os=args.guest_os,
+            hw_version=args.hw_version,
+            memsize_mb=args.memsize,
+            vcpus=args.vcpus,
+            nic=args.nic,
+            connection=args.network,
+            controller=args.controller,
+            boot_delay_ms=args.boot_delay,
+        )
+    except VmxError as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    else:
+        print("%-10s %s" % ("vmx", result["vmx"]))
+        print("%-10s %s" % ("vmdk", result["disk_ref"]))
+        print("%-10s %s  (detected from GPT: %s)" % (
+            "firmware", result["firmware"], result["firmware_detected"]))
+        print("%-10s %s" % ("guestOS", result["guest_os"]))
+        print("%-10s %d MiB / %d vCPU" % ("resources", result["memsize_mb"], result["vcpus"]))
+        print("")
+        print("hint: 双击该 vmx 即可启动。首次开机若报 0xc000000e（winload.efi），"
+              "说明产物 ESP 上的 BCD 不是 bcdboot 版本，需要进 PE 修引导。")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="p2v", description="agent 友好的 P2V 工具链（源设备只读）")
     sub = ap.add_subparsers(dest="command", required=True)
@@ -216,6 +257,28 @@ def build_parser() -> argparse.ArgumentParser:
     vp.add_argument("--sample-bytes", type=int, default=4 * 1024 * 1024)
     vp.add_argument("--json", action="store_true")
     vp.set_defaults(func=_cmd_verify)
+
+    x = sub.add_parser("vmx", help="从产物 vmdk 生成 VMware 的 .vmx")
+    x.add_argument("--vmdk", required=True)
+    x.add_argument("--out", default=None, help="vmx 路径；默认与 vmdk 同目录同名")
+    x.add_argument("--name", default=None, help="displayName / nvram 前缀；默认取 vmdk 文件名")
+    x.add_argument("--guest-os", default=DEFAULT_GUEST_OS,
+                   help="默认 %s（Win10/11 通用，只影响 VMware 的优化提示）" % DEFAULT_GUEST_OS)
+    x.add_argument("--firmware", choices=("auto", "efi", "bios"), default="auto",
+                   help="auto=按产物 GPT 里有没有 ESP 判断（推荐）")
+    x.add_argument("--hw-version", default=DEFAULT_HW_VERSION,
+                   help="virtualHW.version，默认 %s" % DEFAULT_HW_VERSION)
+    x.add_argument("--memsize", type=int, default=DEFAULT_MEMSIZE_MB)
+    x.add_argument("--vcpus", type=int, default=DEFAULT_VCPUS)
+    x.add_argument("--nic", default=DEFAULT_NIC,
+                   help="guest 无 VMware Tools 时必须用内置驱动的网卡，默认 %s" % DEFAULT_NIC)
+    x.add_argument("--network", choices=CONNECTIONS, default=DEFAULT_CONNECTION)
+    x.add_argument("--controller", choices=CONTROLLERS, default=DEFAULT_CONTROLLER)
+    x.add_argument("--boot-delay", type=int, default=DEFAULT_BOOT_DELAY_MS,
+                   help="开机延迟毫秒数（留出按 ESC 选 PE 的窗口）")
+    x.add_argument("--force", action="store_true", help="覆盖已存在的 vmx")
+    x.add_argument("--json", action="store_true")
+    x.set_defaults(func=_cmd_vmx)
 
     return ap
 

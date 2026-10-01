@@ -27,6 +27,12 @@
   只有 `Create` / `Revert`，实测报「找不到方法 Delete」；正确做法是 `Remove-CimInstance`（走提供
   程序的实例删除路径），脚本在删除后**复核**快照是否真的消失，而不是相信返回值；
   ③ 快照 COW 上限默认是卷的 10%（本机 C 盘 12.8 GB），跑完不删会一直挂着。
+- 新增 `p2v vmx` 子命令：从产物 vmdk 生成 VMware Workstation 的 `.vmx`。把 2026-10-01 踩过的
+  「手写 vmx 漏掉 PCIe 根端口 -> `SCSI0 没有可用的 PCIe 插槽 / 配置的 PCI 设备过多`」
+  固化成生成器：`pciBridge0/4/5/6/7`（`pcieRootPort`，functions=8）+ 显式 `pciSlotNumber`（scsi0=16、
+  根端口=17/21/22/23/24、usb=32、ethernet0=33；槽位沿用本机可正常启动的 CentOS 母本，生成前
+  自检槽位不重复）。固件类型由产物 GPT 里有没有 ESP 决定（efi/bios），不靠猜；网卡默认
+  `e1000e`（guest 没有 VMware Tools，只有内置驱动可用）；`--firmware` 与自动探测不符时给出警告。
 
 ### 功能
 
@@ -67,6 +73,11 @@
 
 ### 修复
 
+- **「导出后必须进 PE」被修正为有判据的条件动作**：产物能否直接开机取决于源机 ESP 上
+  `\EFI\Microsoft\Boot\BCD` 的大小 —— 36864（出厂原始 hive）需要在 PE 里 bcdboot；40960（已被
+  Dism++ 引导修复重写过）可直接开机。2026-10-01 实测：源机 BCD 已在 PE 里被重写为 40960，
+  同一套工具导出的产物一次点亮、未进 PE；两次的设备引用完全相同，起决定作用的是 **BCD hive
+  本身**，不是设备引用、也不是 `{fwbootmgr}`。`MANUAL_POST_STEPS` 与 README 同步改写。
 - **卷影副本必须正向匹配卷身份（曾产生错盘镜像）**：`latest_shadow_for_volume()` 原先在
   "本卷没有任何快照"时保留全部快照再取最新，于是没有快照的卷会拿到**别的卷**的快照当
   数据源 —— 实测 C 卷无快照、D 卷有两张，C 盘的数据段被指向 D 卷的

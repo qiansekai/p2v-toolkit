@@ -78,6 +78,9 @@ python -m p2v export --disk 3 --take "ESP,MSR,vol:C:" --out 'H:\sys-p2v.vmdk' --
 
 # 4) 自检产物（结构 + 与源盘 / 快照抽样比对）
 python -m p2v verify --vmdk 'H:\sys-p2v.vmdk' --source-disk 3
+
+# 5) 生成 VMware 的 vmx（自动判 EFI/BIOS，含 PCIe 根端口与槽位分配）
+python -m p2v vmx --vmdk 'H:\sys-p2v.vmdk'
 ```
 
 选择器：`ESP` / `MSR` / `part:N` / `vol:C:`。
@@ -115,16 +118,40 @@ GD/RGD 增量写盘，header 标成 `uncleanShutdown=1`，进度水位、计划�
 崩溃后最多重做一份检查点的数据（默认 256 MiB）。半成品能被 `verify` 认出来：
 它会报 `vmdk_completed` 失败并说明这是未 finalize 的中间态。
 
-### 导出后必须人工收尾（不可跳过）
+### 导出后要不要人工收尾：看 BCD（有判据，不再是无条件）
 
-**导出的 vmdk 不能直接开机。** 必须在 PE 里做两步（作者机器上两次独立复现）：
+产物能否直接开机，取决于**源机 ESP 上 `\EFI\Microsoft\Boot\BCD` 的大小**：
 
-1. **引导修复** —— Dism++ → 引导修复
-   （等价命令 `bcdboot C:\Windows /s <ESP盘符>: /f UEFI`）；不做会报 `0xc000000e`
-   （`File: \Windows\system32\winload.efi`）
-2. **删除所有后装驱动** —— Dism++ → 驱动管理 → 删除所有后装驱动（保留 in-box）
+| BCD 大小 | 含义 | 产物表现 |
+|---|---|---|
+| **36864** | 出厂原始 hive | 首次开机报 `0xc000000e`（`winload.efi`），**必须**进 PE 修引导 |
+| **40960** | 已被 bcdboot / Dism++ 引导修复重写过 | **可直接开机** |
 
-`export` 结束时会把这套提示同时打到 stdout 与 `--json` 的 `manual_steps` 字段。
+这条判据来自两次实测对照：2026-09-29 导出的是 36864 的原始 BCD，报 `0xc000000e`；
+2026-10-01 源机 BCD 已被 PE 里的 Dism++ 引导修复改写成 40960，同一套工具导出的产物
+**一次点亮、未进 PE**。两次的设备引用完全相同 —— 起决定作用的是 **BCD hive 本身**，
+而不是设备引用或 `{fwbootmgr}`。
+
+在源机上先看一眼（只读挂载，不改任何东西）：
+
+```powershell
+mountvol S: /s
+(Get-Item 'S:\EFI\Microsoft\Boot\BCD').Length
+mountvol S: /d
+```
+
+如果读到 36864，可以在**导出之前**于源机重写一遍（Windows 更新自己也做这件事，幂等）：
+
+```powershell
+mountvol S: /s
+bcdboot C:\Windows /s S: /f UEFI
+mountvol S: /d
+```
+
+**删除后装驱动不是开机的必要条件** —— 2026-10-01 实测没做也正常进了系统。它与
+`0xc000000e` 无关（那个错误发生在 winload 阶段），是过引导之后的稳定性措施。
+
+`export` 结束时会把这套提示打到 stdout 与 `--json` 的 `manual_steps` 字段。
 原因与排查过程见项目作者的 P2V 排查笔记（黑屏分层取证 / 盘符错乱两层根因）。
 
 ## USB 硬盘盒里的拆机盘
@@ -273,6 +300,7 @@ p2v/
   export.py    按计划导出（默认 dry-run，支持 --resume 续传）
   resume.py    续传检查点（水位 / 源身份 / 原子落盘）
   verify.py    产物自检
+  vmx.py       从产物生成 VMware 的 .vmx（PCIe 根端口 / 槽位分配）
   __main__.py  CLI 入口
 tests/         单测（标准库 unittest）
 scripts/

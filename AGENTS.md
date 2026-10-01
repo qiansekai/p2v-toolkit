@@ -32,7 +32,8 @@ p2v/
   export.py    按计划导出（默认 dry-run，支持 --resume）
   resume.py    续传检查点（水位 / 源身份 / 原子落盘）
   verify.py    产物自检
-  __main__.py  CLI 入口：probe / plan / export / verify
+  vmx.py       从产物生成 VMware 的 .vmx（PCIe 根端口 / 槽位分配）
+  __main__.py  CLI 入口：probe / plan / export / verify / vmx
 tests/         单测（标准库 unittest，无需真盘）
 scripts/
   p2v-from-usb.ps1          USB 拆机盘导出包装（安全闸 + 可选整盘只读 + 顺序跑四步）
@@ -44,7 +45,7 @@ pyproject.toml / CHANGELOG.md / LICENSE / .github/workflows/ci.yml
 
 ## 开发约定
 
-- 测试：`python -m unittest discover -s tests -t .`（57 项，无需真盘、无需管理员权限 —— 设备层被内存替身替换）
+- 测试：`python -m unittest discover -s tests -t .`（68 项，无需真盘、无需管理员权限 —— 设备层被内存替身替换）
 - **改 `export` / `vmdk` / `gpt` 必须跑测试**：分块循环曾因变量复用出现「首轮后必崩」，
   而当时没有任何自动化回归，只能靠真盘手工跑
 - 新增文件保留 `# SPDX-License-Identifier: GPL-3.0-only` 头
