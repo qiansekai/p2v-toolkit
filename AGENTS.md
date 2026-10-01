@@ -113,6 +113,10 @@ pyproject.toml / CHANGELOG.md / LICENSE / .github/workflows/ci.yml
   所谓「在线一致整盘克隆」= 逐卷 VSS + 分区表重组
 - StarWind V2V Converter 9.0.0.202 的**整盘 CLI 路径**为裸读（日志无 VSS 调用）
 - 本机 `diskshadow` 缺失，`vssadmin` / `wbadmin` 可用
+- 卷影副本的**创建**只能走 CIM 静态方法（客户端版 `vssadmin` 没有 create 子命令，
+  `diskshadow` 常缺失）；**删除**要用 `Remove-CimInstance` —— `Win32_ShadowCopy` 的 CIM
+  方法表只有 `Create` / `Revert`，`Invoke-CimMethod -MethodName Delete` 报「找不到方法 Delete」
+  （2026-10-01 实测）。活系统盘场景的建 / 删由 `scripts/p2v-live-system.ps1` 承担
 
 ## 未实机验证（不要当成可用功能）
 

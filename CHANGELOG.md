@@ -17,10 +17,16 @@
   `vol:X:` 建卷影副本（CIM `Win32_ShadowCopy.Create`）-> `--source-mode shadow` 跑
   plan / export / verify -> `finally` 清理（成功即删；失败默认保留，因为 `--resume` 要求
   快照身份不变）。闸门与 `-DryRun` 已实测（源盘非系统盘 / 目标已存在 /
-  `-Resume` 缺检查点均正确拒绝）；**端到端流程待下一次真实转换验证**，其中建 / 删快照命令
-  本身已在本机实机跑通。顺带记录：客户端版 Windows 的 `vssadmin` **没有 create 子命令**
-  （`vssadmin create shadow` 报 `Invalid command`），`diskshadow` 本机不存在，CIM 静态方法
-  是唯一现成的创建途径。
+  `-Resume` 缺检查点均正确拒绝）；建 / 删快照两条命令路径均已在本机实机跑通（删除路径是把
+  脚本里的真实函数取出来跑：建临时快照 -> 删除 -> 复核为 0），**端到端一次跑通待下一次真实
+  转换验证**。三个实测坑记在这里：
+  ① 客户端版 Windows 的 `vssadmin` **没有 create 子命令**（`vssadmin create shadow` 报
+  `Invalid command`），`diskshadow` 本机也不存在 —— 创建只能走 CIM 静态方法
+  `Invoke-CimMethod -ClassName Win32_ShadowCopy -MethodName Create`；
+  ② **删除不能用 `Invoke-CimMethod -MethodName Delete`**：`Win32_ShadowCopy` 的 CIM 方法表
+  只有 `Create` / `Revert`，实测报「找不到方法 Delete」；正确做法是 `Remove-CimInstance`（走提供
+  程序的实例删除路径），脚本在删除后**复核**快照是否真的消失，而不是相信返回值；
+  ③ 快照 COW 上限默认是卷的 10%（本机 C 盘 12.8 GB），跑完不删会一直挂着。
 
 ### 功能
 

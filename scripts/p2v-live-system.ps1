@@ -1,4 +1,4 @@
-﻿# SPDX-License-Identifier: GPL-3.0-only
+# SPDX-License-Identifier: GPL-3.0-only
 <#
 .SYNOPSIS
     把本机正在运行的系统卷导出为可引导 vmdk（活系统盘 + 卷影副本）。
@@ -160,16 +160,20 @@ function Remove-VolumeShadow([string]$id) {
     $sc = Get-CimInstance -ClassName Win32_ShadowCopy -ErrorAction SilentlyContinue |
           Where-Object { $_.ID -eq $id }
     if ($null -eq $sc) { Warn "快照 $id 已不存在（可能被存储上限回收）"; return $true }
-    $r = Invoke-CimMethod -InputObject $sc -MethodName Delete
-    if ($null -ne $r -and $r.ReturnValue -eq 0) { Ok "已删除快照 $id"; return $true }
-    Warn ("删除快照 {0} 失败（ReturnValue={1}），请手工：vssadmin delete shadows /shadow={0} /quiet" -f $id, $r.ReturnValue)
+
+    # Win32_ShadowCopy 的 CIM 方法表只有 Create / Revert —— 没有 Delete，
+    # Invoke-CimMethod -MethodName Delete 会报「找不到方法 Delete」（实测）。
+    # Remove-CimInstance 走提供程序的实例删除路径，实测可用；vssadmin 作回退。
+    try { Remove-CimInstance -InputObject $sc -ErrorAction Stop }
+    catch { & vssadmin delete shadows /shadow=$id /quiet 2>&1 | Out-Null }
+
+    # 不信返回值，删除后复核：快照真的没了才算成功
+    $after = Get-CimInstance -ClassName Win32_ShadowCopy -ErrorAction SilentlyContinue |
+             Where-Object { $_.ID -eq $id }
+    if ($null -eq $after) { Ok "已删除快照 $id"; return $true }
+    Warn ("删除快照 {0} 失败，请手工：vssadmin delete shadows /shadow={0} /quiet" -f $id)
     return $false
 }
-
-# ---------- 5) 命令拼装 ----------
-$sourceMode = 'shadow'
-$pyPlan = @('-m','p2v','plan','--disk',"$Disk",'--take',$Take,'--out',$Out,'--source-mode',$sourceMode)
-$exportArgs = @('-m','p2v','export','--disk',"$Disk",'--take',$Take,'--out',$Out,
                 '--source-mode',$sourceMode,'--chunk-mib',"$ChunkMiB",
                 '--checkpoint-mib',"$CheckpointMiB",'--apply')
 if ($Resume) { $exportArgs += '--resume' }
