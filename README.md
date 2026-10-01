@@ -183,7 +183,8 @@ crash-consistent（移动中）的文件系统。工具本身刻意不创建快�
 脚本负责：确认源盘就是本机系统盘（离线拆机盘会被拒绝，请改用 usb 版）、为 `vol:X:` 建卷影副本、
 用 `--source-mode shadow` 跑 plan / export / verify，并在 `finally` 里删掉自己建的那份快照。
 失败时默认**保留**快照 —— 续传要求快照身份不变，删了检查点就作废。开关：
-`-DryRun`、`-KeepShadow`、`-DeleteShadowOnFailure`、`-Resume`、`-SkipVerify`、`-Json`。
+`-DryRun`、`-KeepShadow`、`-DeleteShadowOnFailure`、`-Resume`、`-SkipVerify`、`-Json`、`-SkipBcdCheck`、`-PreflightBcdboot`。
+脚本还会在导出前读一眼源机 ESP 上 BCD 的大小，直接告诉你产物能不能开（见上一节）。
 
 > 客户端版 Windows 的 `vssadmin` **没有 create 子命令**（本机实测只有 Delete Shadows /
 > List * / Resize ShadowStorage，`vssadmin create shadow` 直接报 `Invalid command`），

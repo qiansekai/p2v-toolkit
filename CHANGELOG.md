@@ -27,6 +27,12 @@
   只有 `Create` / `Revert`，实测报「找不到方法 Delete」；正确做法是 `Remove-CimInstance`（走提供
   程序的实例删除路径），脚本在删除后**复核**快照是否真的消失，而不是相信返回值；
   ③ 快照 COW 上限默认是卷的 10%（本机 C 盘 12.8 GB），跑完不删会一直挂着。
+- `scripts/p2v-live-system.ps1` 新增 BCD 判据预检：导出前只读挂载源机 ESP，按
+  `\EFI\Microsoft\Boot\BCD` 的大小直接告诉你产物要不要进 PE（36864 需要 / 40960 不需要），
+  并可用 `-PreflightBcdboot` 在导出前于源机重写一遍（默认关闭 —— 它改写源机引导配置）；
+  `-SkipBcdCheck` 可跳过。**同时修掉一处误删**：早先修 `Remove-VolumeShadow` 时把
+  `# 5) 命令拼装` 段的前 5 行一并替换掉了，脚本从那时起无法运行（用 AST 只提函数跑的
+  删除路径测试察觉不到；这次靠整体语法检查抓到）。
 - 新增 `p2v vmx` 子命令：从产物 vmdk 生成 VMware Workstation 的 `.vmx`。把 2026-10-01 踩过的
   「手写 vmx 漏掉 PCIe 根端口 -> `SCSI0 没有可用的 PCIe 插槽 / 配置的 PCI 设备过多`」
   固化成生成器：`pciBridge0/4/5/6/7`（`pcieRootPort`，functions=8）+ 显式 `pciSlotNumber`（scsi0=16、

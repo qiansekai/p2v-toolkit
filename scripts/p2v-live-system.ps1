@@ -51,8 +51,17 @@
 .PARAMETER DeleteShadowOnFailure
     失败时也删快照（默认保留，便于 --resume 续传）。
 
+.PARAMETER SkipBcdCheck
+    跳过源机 ESP 的 BCD 判据预检（默认做：只读挂载 S: 看一眼文件大小）。
+
+.PARAMETER PreflightBcdboot
+    预检发现 BCD 是出厂原始 hive（36864）时，在**源机**上跑一次
+    bcdboot C:\Windows /s S: /f UEFI 把它重写成 40960，这样产物可以直接开机、
+    不必再进 PE。默认关闭 —— 它会改写源机 ESP 上的引导配置（幂等，Windows 更新
+    自己也做这件事，但仍属对宿主状态的改动，所以要显式开启）。
+
 .PARAMETER DryRun
-    只做检查并打印将要执行的步骤：不建快照、不写盘。
+    只做检查并打印将要执行的步骤：不建快照、不写盘（-PreflightBcdboot 也只打印）。
 #>
 [CmdletBinding()]
 param(
@@ -66,6 +75,8 @@ param(
     [switch]$SkipVerify,
     [switch]$KeepShadow,
     [switch]$DeleteShadowOnFailure,
+    [switch]$SkipBcdCheck,
+    [switch]$PreflightBcdboot,
     [switch]$DryRun
 )
 
@@ -98,6 +109,45 @@ if ($Disk -le 0) {
     Fail "盘 #$Disk 不是本机系统盘（系统盘是 #$sysDisk）。离线/拆机盘请用 scripts\p2v-from-usb.ps1。"
 }
 Ok "安全闸通过：源盘 #$Disk 就是本机系统盘"
+
+# ---------- 1.5) 源机 ESP 的 BCD 判据（只读；决定产物能否直接开机）----------
+# 36864 = 出厂原始 hive      -> 产物首次开机报 0xc000000e，需要进 PE 修引导
+# 40960 = 已被引导修复重写过 -> 可直接开机（2026-10-01 实测）
+$bcdMounted = $false
+if (-not $SkipBcdCheck) {
+    mountvol S: /s 2>&1 | Out-Null
+    if (Test-Path 'S:\EFI') { $bcdMounted = $true }
+    $bcdPath = 'S:\EFI\Microsoft\Boot\BCD'
+    if ($bcdMounted -and (Test-Path $bcdPath)) {
+        $bcdSize = (Get-Item $bcdPath).Length
+        if ($bcdSize -eq 40960) {
+            Ok "BCD 大小 $bcdSize（bcdboot 版本）-> 产物可直接开机"
+        } elseif ($bcdSize -eq 36864) {
+            Warn "BCD 大小 $bcdSize（出厂原始 hive）-> 产物首次开机大概率报 0xc000000e，需要进 PE 修引导"
+            if ($PreflightBcdboot) {
+                if ($DryRun) {
+                    Info 'DryRun：本想跑 bcdboot 预修，已跳过（不动源机）'
+                } else {
+                    Info '按 -PreflightBcdboot 预修源机引导（幂等，Windows 更新自己也做）'
+                    & bcdboot ($env:SystemDrive + '\Windows') /s S: /f UEFI
+                    $after = (Get-Item $bcdPath -ErrorAction SilentlyContinue).Length
+                    if ($after -eq 40960) { Ok "BCD 已重写为 $after -> 产物可直接开机" }
+                    else { Warn "bcdboot 之后 BCD 仍是 $after，请自行确认" }
+                }
+            } else {
+                Info '  想免掉 PE：加 -PreflightBcdboot，在导出前把它重写一遍'
+            }
+        } else {
+            Warn "BCD 大小 $bcdSize 不在预期集合（36864 / 40960），请自行判断"
+        }
+    } elseif ($bcdMounted) {
+        Warn "挂到了 S: 但读不到 $bcdPath，跳过 BCD 判据"
+    } else {
+        Warn 'ESP 挂载失败（S: 可能已被占用），跳过 BCD 判据'
+    }
+    # 只在确实挂上了 ESP 时才卸载 —— 免得把用户自己的 S: 盘卸载掉
+    if ($bcdMounted) { mountvol S: /d 2>&1 | Out-Null }
+}
 
 # ---------- 2) 选择器与目标路径 ----------
 if ([string]::IsNullOrWhiteSpace($Take)) { $Take = 'ESP,MSR,vol:' + $sysLetter + ':' }
@@ -174,6 +224,11 @@ function Remove-VolumeShadow([string]$id) {
     Warn ("删除快照 {0} 失败，请手工：vssadmin delete shadows /shadow={0} /quiet" -f $id)
     return $false
 }
+
+# ---------- 5) 命令拼装 ----------
+$sourceMode = 'shadow'
+$pyPlan = @('-m','p2v','plan','--disk',"$Disk",'--take',$Take,'--out',$Out,'--source-mode',$sourceMode)
+$exportArgs = @('-m','p2v','export','--disk',"$Disk",'--take',$Take,'--out',$Out,
                 '--source-mode',$sourceMode,'--chunk-mib',"$ChunkMiB",
                 '--checkpoint-mib',"$CheckpointMiB",'--apply')
 if ($Resume) { $exportArgs += '--resume' }
