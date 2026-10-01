@@ -143,6 +143,26 @@ mountvol /E     # 收尾恢复自动挂载
 顺序跑 probe / plan / export / verify，并可选把源盘整盘设为只读（在 `finally` 里恢复并核对）。
 开关：`-DryRun`（只检查与打印）、`-NoLock`、`-KeepReadOnly`。
 
+## 本机正在运行的系统盘
+
+源盘就是本机系统盘时，它一直在被写入 —— 必须从**卷影副本**读，否则拿到的只是一份
+crash-consistent（移动中）的文件系统。工具本身刻意不创建快照（安全红线：不改宿主 VSS
+状态），所以建 / 删快照由包装脚本承担：
+
+```powershell
+.\scripts\p2v-live-system.ps1 -Out 'H:\sys-20261001.vmdk'
+```
+
+脚本负责：确认源盘就是本机系统盘（离线拆机盘会被拒绝，请改用 usb 版）、为 `vol:X:` 建卷影副本、
+用 `--source-mode shadow` 跑 plan / export / verify，并在 `finally` 里删掉自己建的那份快照。
+失败时默认**保留**快照 —— 续传要求快照身份不变，删了检查点就作废。开关：
+`-DryRun`、`-KeepShadow`、`-DeleteShadowOnFailure`、`-Resume`、`-SkipVerify`、`-Json`。
+
+> 客户端版 Windows 的 `vssadmin` **没有 create 子命令**（本机实测只有 Delete Shadows /
+> List * / Resize ShadowStorage，`vssadmin create shadow` 直接报 `Invalid command`），
+> `diskshadow` 也常常不存在；可用的创建方式就是 CIM 静态方法
+> `Invoke-CimMethod -ClassName Win32_ShadowCopy -MethodName Create -Arguments @{Volume='C:\';Context='ClientAccessible'}`。
+
 ## 格式转换（VHDX ↔ VMDK）
 
 本工具**只输出 monolithicSparse vmdk**。要上 Hyper-V（或从 Hyper-V 迁回来）时用 qemu-img
@@ -257,6 +277,7 @@ p2v/
 tests/         单测（标准库 unittest）
 scripts/
   p2v-from-usb.ps1          USB 拆机盘导出包装（安全闸 + 可选整盘只读）
+  p2v-live-system.ps1       活系统盘导出包装（建/删卷影副本 + 安全闸）
   expand-system-in-pe.cmd   PE 内可选的系统分区扩容（未实机验证）
   grain-fit.py              只读测源盘空洞分布，回答"该用多大 grain"
 ```

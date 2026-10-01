@@ -12,6 +12,15 @@
   1 TiB 容量下元数据总共 128 MiB（0.0122%），放大 grain 只会让跨在数据边缘的空洞被
   整块分配。两台真机实测（零占比 25~37%）产物最小的都是 64 KiB；1 MiB 胀 0.6%~4%，
   2048 KiB 胀 1.2%~6.4%
+- `scripts/p2v-live-system.ps1`：本机**在运行的系统卷**导出包装。工具刻意不建快照
+  （`vss.py` 只枚举与只读打开现有快照），所以建 / 删快照由脚本承担：为 `--take` 里的每个
+  `vol:X:` 建卷影副本（CIM `Win32_ShadowCopy.Create`）-> `--source-mode shadow` 跑
+  plan / export / verify -> `finally` 清理（成功即删；失败默认保留，因为 `--resume` 要求
+  快照身份不变）。闸门与 `-DryRun` 已实测（源盘非系统盘 / 目标已存在 /
+  `-Resume` 缺检查点均正确拒绝）；**端到端流程待下一次真实转换验证**，其中建 / 删快照命令
+  本身已在本机实机跑通。顺带记录：客户端版 Windows 的 `vssadmin` **没有 create 子命令**
+  （`vssadmin create shadow` 报 `Invalid command`），`diskshadow` 本机不存在，CIM 静态方法
+  是唯一现成的创建途径。
 
 ### 功能
 

@@ -36,6 +36,7 @@ p2v/
 tests/         单测（标准库 unittest，无需真盘）
 scripts/
   p2v-from-usb.ps1          USB 拆机盘导出包装（安全闸 + 可选整盘只读 + 顺序跑四步）
+  p2v-live-system.ps1       活系统盘导出包装（建/删卷影副本 + 安全闸 + 顺序跑三步）
   expand-system-in-pe.cmd   PE 内可选的系统分区扩容（未实机验证）
   grain-fit.py              只读测源盘空洞分布，回答"该用多大 grain"（见「grain 尺寸」）
 pyproject.toml / CHANGELOG.md / LICENSE / .github/workflows/ci.yml
