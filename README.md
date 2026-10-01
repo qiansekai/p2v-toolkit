@@ -186,6 +186,12 @@ crash-consistent（移动中）的文件系统。工具本身刻意不创建快�
 `-DryRun`、`-KeepShadow`、`-DeleteShadowOnFailure`、`-Resume`、`-SkipVerify`、`-Json`、`-SkipBcdCheck`、`-PreflightBcdboot`。
 脚本还会在导出前读一眼源机 ESP 上 BCD 的大小，直接告诉你产物能不能开（见上一节）。
 
+**`-PreflightBcdboot` 修引导时，源与目标都显式、且都限定在本次源盘**：脚本用 `mountvol S: /L` 取卷 GUID
+与源盘 ESP 分区的 GUID 比对，不符就**拒绝写** —— 不让 bcdboot 自己挑 ESP（多 ESP 或插了外接盘时
+会修错盘）。外部拆机盘场景（`p2v-from-usb.ps1`）不要复用这段：那时源与目标都在外部盘上，
+盘符与本机完全不同。（`Get-Volume` / `Get-Partition` / `Win32_Volume` 在 ESP 挂上盘符后都看不见它，
+只有 `mountvol /L` 可靠 —— 实测。）
+
 > 客户端版 Windows 的 `vssadmin` **没有 create 子命令**（本机实测只有 Delete Shadows /
 > List * / Resize ShadowStorage，`vssadmin create shadow` 直接报 `Invalid command`），
 > `diskshadow` 也常常不存在；可用的创建方式就是 CIM 静态方法

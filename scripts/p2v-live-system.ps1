@@ -60,6 +60,11 @@
     不必再进 PE。默认关闭 —— 它会改写源机 ESP 上的引导配置（幂等，Windows 更新
     自己也做这件事，但仍属对宿主状态的改动，所以要显式开启）。
 
+    幂等的前提是**源与目标都显式且都落在本次源盘上**：脚本会先核对 S: 的物理盘号
+    与分区类型确实是本机系统盘上的 ESP，不符就拒绝写（宁可不修，也不修错盘）。
+    绝不让 bcdboot 自己挑 ESP；外部拆机盘场景（p2v-from-usb.ps1）不要复用这段 ——
+    那时源与目标都在外部盘上，盘符与本机完全不同。
+
 .PARAMETER DryRun
     只做检查并打印将要执行的步骤：不建快照、不写盘（-PreflightBcdboot 也只打印）。
 #>
@@ -128,11 +133,28 @@ if (-not $SkipBcdCheck) {
                 if ($DryRun) {
                     Info 'DryRun：本想跑 bcdboot 预修，已跳过（不动源机）'
                 } else {
-                    Info '按 -PreflightBcdboot 预修源机引导（幂等，Windows 更新自己也做）'
-                    & bcdboot ($env:SystemDrive + '\Windows') /s S: /f UEFI
-                    $after = (Get-Item $bcdPath -ErrorAction SilentlyContinue).Length
-                    if ($after -eq 40960) { Ok "BCD 已重写为 $after -> 产物可直接开机" }
-                    else { Warn "bcdboot 之后 BCD 仍是 $after，请自行确认" }
+                    # 修引导必须**显式**指定源与目标，而且要先证明目标就是本次源盘上的 ESP。
+                    # 三条禁止：① 不让 bcdboot 自己挑 ESP（多 ESP / 插了外接盘时会修错盘）；
+                    # ② 不在外部盘场景复用这段（那时源与目标都在外部盘上，盘符完全不同）；
+                    # ③ 校验不过就不写 —— 宁可不修，也不要把引导写到别的盘上。
+                    # ESP 挂上盘符后 Get-Volume / Get-Partition / Win32_Volume 都看不见它
+                    # （实测：`Get-Partition -DriveLetter S` 直接报 No MSFT_Partition objects），
+                    # 唯一可靠的身份来源是 mountvol S: /L 给出的卷 GUID。
+                    $espGuid = '{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}'
+                    $espOnSource = @(Get-Partition -DiskNumber $Disk -ErrorAction SilentlyContinue |
+                                     Where-Object { $_.GptType -eq $espGuid })
+                    $mountedVol = ((mountvol S: /L 2>&1) -join ' ').Trim()
+                    $espOk = ($espOnSource.Count -gt 0) -and
+                             ($mountedVol -like ('*' + $espOnSource[0].Guid + '*'))
+                    if (-not $espOk) {
+                        Warn ("拒绝写引导：S: 挂的不是源盘 #$Disk 上的 ESP（S:=$mountedVol）—— 宁可不修，也不修错盘")
+                    } else {
+                        Info ("将写引导：源 $env:SystemDrive\Windows -> 目标 S:（已核对是源盘 #$Disk 分区 #$($espOnSource[0].PartitionNumber) 的 ESP）")
+                        & bcdboot ($env:SystemDrive + '\Windows') /s S: /f UEFI
+                        $after = (Get-Item $bcdPath -ErrorAction SilentlyContinue).Length
+                        if ($after -eq 40960) { Ok "BCD 已重写为 $after -> 产物可直接开机" }
+                        else { Warn "bcdboot 之后 BCD 仍是 $after，请自行确认" }
+                    }
                 }
             } else {
                 Info '  想免掉 PE：加 -PreflightBcdboot，在导出前把它重写一遍'
