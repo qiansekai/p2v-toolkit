@@ -234,7 +234,7 @@ python scripts\grain-fit.py --disk 0 --partition 1 --json
 python -m unittest discover -s tests -t .
 ```
 
-52 项单测，**不需要真实磁盘、不需要管理员权限**：设备层被内存替身替换，
+57 项单测，**不需要真实磁盘、不需要管理员权限**：设备层被内存替身替换，
 因此 GPT / vmdk / export / verify / 续传 / grain-fit 的核心逻辑可以在任何机器上回归。
 `tests/test_gpt.py`、`tests/test_vmdk.py`、`tests/test_grain_fit.py` 跨平台，其余需要 Windows。
 性能与 grain 相关的语义回归见 `tests/test_vmdk.py::HotPathTest`（4 项）。

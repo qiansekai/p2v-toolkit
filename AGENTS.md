@@ -43,7 +43,7 @@ pyproject.toml / CHANGELOG.md / LICENSE / .github/workflows/ci.yml
 
 ## 开发约定
 
-- 测试：`python -m unittest discover -s tests -t .`（52 项，无需真盘、无需管理员权限 —— 设备层被内存替身替换）
+- 测试：`python -m unittest discover -s tests -t .`（57 项，无需真盘、无需管理员权限 —— 设备层被内存替身替换）
 - **改 `export` / `vmdk` / `gpt` 必须跑测试**：分块循环曾因变量复用出现「首轮后必崩」，
   而当时没有任何自动化回归，只能靠真盘手工跑
 - 新增文件保留 `# SPDX-License-Identifier: GPL-3.0-only` 头

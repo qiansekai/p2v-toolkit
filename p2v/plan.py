@@ -187,12 +187,26 @@ def shadow_identity(shadow_index: int) -> dict:
     return {}
 
 
+def _normalize_volume_id(value) -> str:
+    """卷标识归一化（仅用于比较）：去掉 JSON 引号、空白与首尾反斜杠。
+
+    WMI 给的 VolumeName 形如 "\\\\?\\Volume{guid}\\"，Get-Volume 的 UniqueId 同形，
+    但两边的前缀写法不保证逐字一致，所以统一归一化后做后缀比较。
+    """
+    return str(value or "").strip().strip('"').strip("\\").lower()
+
+
 def latest_shadow_for_volume(letter: str) -> dict | None:
     """取该卷最新的可用卷影副本，**连身份一起返回**（只读枚举，不创建）。
 
     只返回序号是不够的：HarddiskVolumeShadowCopyN 会被系统复用，第二天重新
     plan 时同一个序号可能已经是另一个快照。所以把 WMI 的 Shadow Copy ID
     （GUID）与创建时间一并带出来，供续传时逐项比对。
+
+    卷匹配必须**正向确认**：目标卷自己的快照列表为空、或查不到该卷的 UniqueId
+    时，一律返回 None。曾写成"匹配为空就保留全部快照再取最新"，于是没有快照的
+    C 卷会拿到 D 卷的快照当数据源 —— 产物结构完全合法、verify 也全绿，但盘里
+    装的是另一个卷的内容。这种错盘镜像比"没有快照"糟糕得多。
     """
     from .vss import list_shadows  # 局部导入避免环依赖
 
@@ -204,13 +218,16 @@ def latest_shadow_for_volume(letter: str) -> dict | None:
     shadows = [s for s in list_shadows() if s.get("shadow_index") is not None]
     if not shadows:
         return None
-    if vol_guid:
-        want = str(vol_guid).strip()
-        same = [s for s in shadows if s.get("volume", "").rstrip("\\").endswith(want.strip("\\"))]
-        if same:
-            shadows = same
-    shadows.sort(key=lambda s: str(s.get("install_date") or ""))
-    best = shadows[-1]
+    want = _normalize_volume_id(vol_guid)
+    if not want:
+        # 拿不到本卷身份就不猜：宁可回落直读物理盘，也不冒险用别的卷的快照
+        return None
+    same = [s for s in shadows
+            if _normalize_volume_id(s.get("volume")).endswith(want)]
+    if not same:
+        return None
+    same.sort(key=lambda s: str(s.get("install_date") or ""))
+    best = same[-1]
     return {
         "shadow_index": int(best["shadow_index"]),
         "id": str(best.get("id") or "").strip().upper(),
